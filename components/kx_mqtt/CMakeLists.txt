@@ -1,11 +1,10 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS "kx_mqtt.c"
     INCLUDE_DIRS "."
     REQUIRES
         kx_system
-        kx_mqtt
-        nvs_flash
-        esp_wifi
-        esp_netif
+        mqtt
         esp_event
+        freertos
+        esp_timer
 )
