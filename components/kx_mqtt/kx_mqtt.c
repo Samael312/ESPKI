@@ -22,43 +22,35 @@ static volatile bool            s_connected = false;
 static char s_lwt_topic[64];
 static char s_lwt_payload[128];
 
-// ── Helpers de topic ──────────────────────────────────────────
-static void _build_topic(char *buf, size_t len, const char *fmt)
-{
-    snprintf(buf, len, fmt, kx_system_device_id());
-}
 
 // ── Publica connection/status ─────────────────────────────────
 static void _publish_status(const char *status)
 {
-    char topic[64], payload[256];
-    _build_topic(topic, sizeof(topic), KX_TOPIC_STATUS);
-
+    char payload[256];
     snprintf(payload, sizeof(payload),
         "{\"device_id\":\"%s\",\"status\":\"%s\",\"ts\":%lu,\"fw_ver\":\"%s\"}",
-        kx_system_device_id(),
-        status,
-        (unsigned long)time(NULL),
-        KX_FW_VERSION);
+        KX_DEVICE_UUID, status, (unsigned long)time(NULL), KX_FW_VERSION);
 
-    esp_mqtt_client_publish(s_client, topic, payload, 0, 1, 1 /* retained */);
+    esp_mqtt_client_publish(s_client, KX_TOPIC_STATUS, payload, 0, 1, 1);
     ESP_LOGI(TAG, "status → %s", status);
 }
 
-// ── Suscripciones al conectar ─────────────────────────────────
 static void _subscribe_all(void)
 {
-    char topic[64];
+    ESP_LOGI(TAG, "subscribing 1: [%s] len=%d", 
+             KX_TOPIC_CONFIG_DEVICE, strlen(KX_TOPIC_CONFIG_DEVICE));
+    esp_mqtt_client_subscribe(s_client, KX_TOPIC_CONFIG_DEVICE, 0);
+    vTaskDelay(pdMS_TO_TICKS(200));
 
-    _build_topic(topic, sizeof(topic), KX_TOPIC_CONFIG_DEVICE);
-    esp_mqtt_client_subscribe(s_client, topic, 1);
-    ESP_LOGI(TAG, "subscribed: %s", topic);
+    ESP_LOGI(TAG, "subscribing 2: [%s] len=%d", 
+             KX_TOPIC_CONFIG_CONTROLS, strlen(KX_TOPIC_CONFIG_CONTROLS));
+    esp_mqtt_client_subscribe(s_client, KX_TOPIC_CONFIG_CONTROLS, 0);
+    vTaskDelay(pdMS_TO_TICKS(200));
 
-    _build_topic(topic, sizeof(topic), KX_TOPIC_CONFIG_CONTROLS);
-    esp_mqtt_client_subscribe(s_client, topic, 1);
-    ESP_LOGI(TAG, "subscribed: %s", topic);
+    ESP_LOGI(TAG, "subscribing 3: [%s] len=%d", 
+             KX_TOPIC_CONFIG_ENTITIES, strlen(KX_TOPIC_CONFIG_ENTITIES));
+    esp_mqtt_client_subscribe(s_client, KX_TOPIC_CONFIG_ENTITIES, 0);
 }
-
 // ── Event handler ─────────────────────────────────────────────
 static void _mqtt_event_handler(void *arg, esp_event_base_t base,
                                 int32_t event_id, void *event_data)
@@ -71,6 +63,8 @@ static void _mqtt_event_handler(void *arg, esp_event_base_t base,
         s_connected = true;
         kx_system_set_mqtt_state(KX_MQTT_CONNECTED);
         ESP_LOGI(TAG, "CONNECTED to broker");
+        ESP_LOGI(TAG, "mqtt stack watermark: %d bytes free",
+                uxTaskGetStackHighWaterMark(NULL) * 4);
         _subscribe_all();
         _publish_status("online");
         break;
@@ -121,29 +115,53 @@ esp_err_t kx_mqtt_start(kx_mqtt_msg_cb_t on_message)
     s_msg_cb = on_message;
 
     // Construir LWT
-    snprintf(s_lwt_topic,   sizeof(s_lwt_topic),
-             KX_TOPIC_STATUS, kx_system_device_id());
+    snprintf(s_lwt_topic,   sizeof(s_lwt_topic),   "%s", KX_TOPIC_STATUS);
     snprintf(s_lwt_payload, sizeof(s_lwt_payload),
-             "{\"device_id\":\"%s\",\"status\":\"offline\",\"ts\":0}",
-             kx_system_device_id());
+        "{\"device_id\":\"%s\",\"status\":\"offline\",\"ts\":0}",
+        KX_DEVICE_UUID);
 
     // Client ID
     char client_id[32];
     snprintf(client_id, sizeof(client_id), "kx_%s", kx_system_device_id());
 
     esp_mqtt_client_config_t cfg = {
-        .broker.address.uri       = KX_MQTT_BROKER_URI,
-        .credentials.client_id    = client_id,
-        .credentials.username     = KX_MQTT_USERNAME,
-        .credentials.authentication.password = KX_MQTT_PASSWORD,
-        .session.keepalive         = KX_MQTT_KEEPALIVE_S,
-        .session.last_will.topic   = s_lwt_topic,
-        .session.last_will.msg     = s_lwt_payload,
-        .session.last_will.qos     = 1,
-        .session.last_will.retain  = 1,
-        .network.reconnect_timeout_ms = KX_MQTT_RECONNECT_MIN_MS,
-        .buffer.size               = KX_PAYLOAD_MAX_BYTES,
-    };
+    .broker.address.uri            = KX_MQTT_BROKER_URI,
+    .credentials.client_id         = client_id,
+
+    // ── Autenticación ────────────────────────────────────────
+    // Desactivado para pruebas con allow_anonymous
+    // Activar en producción:
+    // .credentials.username                    = KX_MQTT_USERNAME,
+    // .credentials.authentication.password     = KX_MQTT_PASSWORD,
+
+    // ── TLS ──────────────────────────────────────────────────
+    // OPCIÓN A: sin TLS (desarrollo local, allow_anonymous)
+    // → usar URI  mqtt://host:1883   ← activo ahora
+    // No hay nada que configurar aquí.
+
+    // OPCIÓN B: TLS con CA reconocida (Let's Encrypt)
+    // → cambiar URI a  mqtts://host:8883
+    // → descomentar las dos líneas siguientes:
+    // .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
+
+    // OPCIÓN C: TLS con certificado autofirmado
+    // → cambiar URI a  mqtts://host:8883
+    // → embed el .pem en CMakeLists con EMBED_TXTFILES
+    // → descomentar las dos líneas siguientes:
+    // .broker.verification.certificate     = (const char *)broker_ca_pem_start,
+    // .broker.verification.certificate_len = broker_ca_pem_end - broker_ca_pem_start,
+
+    // ── Sesión ───────────────────────────────────────────────
+    .session.keepalive          = KX_MQTT_KEEPALIVE_S,
+    .session.last_will.topic    = s_lwt_topic,
+    .session.last_will.msg      = s_lwt_payload,
+    .session.last_will.qos      = 1,
+    .session.last_will.retain   = 1,
+
+    // ── Red ──────────────────────────────────────────────────
+    .network.reconnect_timeout_ms = KX_MQTT_RECONNECT_MIN_MS,
+    .buffer.size                  = KX_PAYLOAD_MAX_BYTES,
+};
 
     s_client = esp_mqtt_client_init(&cfg);
     if (!s_client) {

@@ -66,7 +66,7 @@ static void _telemetry_task(void *arg)
     char payload[KX_PAYLOAD_MAX_BYTES];
     uint32_t seq = 0;
 
-    snprintf(topic, sizeof(topic), KX_TOPIC_TELEMETRY, kx_system_device_id());
+    snprintf(topic, sizeof(topic), "%s", KX_TOPIC_TELEMETRY);
 
     ESP_LOGI(TAG, "task started, interval=%ds", KX_TELEMETRY_INTERVAL_S);
 

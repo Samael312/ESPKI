@@ -7,14 +7,20 @@
 // =============================================================
 
 // ── WiFi ─────────────────────────────────────────────────────
-#define KX_WIFI_SSID            "kiconex_pruebas_ansible"       // TODO: cambiar
-#define KX_WIFI_PASSWORD        "KiconexWiFi"   // TODO: cambiar
+//#define KX_WIFI_SSID            "kiconex_pruebas_ansible"    
+#define KX_WIFI_SSID            "WIFI-PISO"   
+//#define KX_WIFI_PASSWORD        "KiconexWiFi"   
+#define KX_WIFI_PASSWORD        "1234567890"
 #define KX_WIFI_MAX_RETRY       10
 
 // ── MQTT Broker ───────────────────────────────────────────────
-#define KX_MQTT_BROKER_URI      "mqtt://pruebas.kiconex.com:28883"  
-#define KX_MQTT_USERNAME        "iotest"   
-#define KX_MQTT_PASSWORD        "iotest"
+//#define KX_MQTT_BROKER_URI      "mqtt://pruebas.kiconex.com:28883"  
+//#define KX_MQTT_USERNAME        "iotest"   
+//#define KX_MQTT_PASSWORD        "iotest"
+
+#define KX_MQTT_BROKER_URI      "mqtt://192.168.5.108:1883"
+#define KX_MQTT_USERNAME        ""  
+#define KX_MQTT_PASSWORD        ""   
 #define KX_MQTT_KEEPALIVE_S       60
 #define KX_MQTT_RECONNECT_MIN_MS  5000
 #define KX_MQTT_RECONNECT_MAX_MS  60000
@@ -36,14 +42,19 @@
 // ── Payload ───────────────────────────────────────────────────
 #define KX_PAYLOAD_MAX_BYTES     4096
 
-// ── Topics MQTT (patrón: kx/{device_id}/...) ─────────────────
-#define KX_TOPIC_PREFIX          "kx"
-#define KX_TOPIC_STATUS          KX_TOPIC_PREFIX "/%s/connection/status"
-#define KX_TOPIC_TELEMETRY       KX_TOPIC_PREFIX "/%s/telemetry"
-#define KX_TOPIC_CONFIG_DEVICE   KX_TOPIC_PREFIX "/%s/config/device"
-#define KX_TOPIC_CONFIG_CONTROLS KX_TOPIC_PREFIX "/%s/config/controls"
-#define KX_TOPIC_CONFIG_ACK      KX_TOPIC_PREFIX "/%s/config/ack"
-#define KX_TOPIC_CONFIG_ERROR    KX_TOPIC_PREFIX "/%s/config/error"
+// ── Identidad ─────────────────────────────────────────────────
+#define KX_DEVICE_UUID  "d041dd10-bf3a-456f-851a-135e2233d577"
+
+// ── Topics entrantes (broker → dispositivo) ───────────────────
+#define KX_TOPIC_CONFIG_DEVICE    KX_DEVICE_UUID "/config"
+#define KX_TOPIC_CONFIG_CONTROLS  KX_DEVICE_UUID "/controls"
+#define KX_TOPIC_CONFIG_ENTITIES  KX_DEVICE_UUID "/controls/+/entities"
+
+// ── Topics salientes (dispositivo → broker) ───────────────────
+#define KX_TOPIC_STATUS       KX_DEVICE_UUID "/connection/status"
+#define KX_TOPIC_TELEMETRY    KX_DEVICE_UUID "/telemetry"
+#define KX_TOPIC_CONFIG_ACK   KX_DEVICE_UUID "/config/ack"
+#define KX_TOPIC_CONFIG_ERROR KX_DEVICE_UUID "/config/error"
 
 // ── Firmware version ──────────────────────────────────────────
 #define KX_FW_VERSION            "0.1.0"

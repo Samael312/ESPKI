@@ -13,14 +13,14 @@ static const char *TAG = "kx_config";
 // ── Helpers de respuesta ──────────────────────────────────────
 static void _send_ack(const char *config_type)
 {
-    char topic[64], payload[256];
-    snprintf(topic, sizeof(topic), KX_TOPIC_CONFIG_ACK, kx_system_device_id());
+    char payload[256];
+    // quitar: snprintf(topic, sizeof(topic), KX_TOPIC_CONFIG_ACK, kx_system_device_id());
     snprintf(payload, sizeof(payload),
         "{\"device_id\":\"%s\",\"ts\":%lu,\"config_type\":\"%s\",\"status\":\"ok\"}",
-        kx_system_device_id(),
+        KX_DEVICE_UUID,
         (unsigned long)time(NULL),
         config_type);
-    kx_mqtt_publish(topic, payload, 1, 0);
+    kx_mqtt_publish(KX_TOPIC_CONFIG_ACK, payload, 1, 0);
     ESP_LOGI(TAG, "ack sent for '%s'", config_type);
 }
 
@@ -28,19 +28,19 @@ static void _send_error(const char *config_type,
                          const char *error_code,
                          const char *detail)
 {
-    char topic[64], payload[512];
-    snprintf(topic, sizeof(topic), KX_TOPIC_CONFIG_ERROR, kx_system_device_id());
+    char payload[512];
+    // quitar: snprintf(topic, sizeof(topic), KX_TOPIC_CONFIG_ERROR, kx_system_device_id());
     snprintf(payload, sizeof(payload),
         "{\"device_id\":\"%s\",\"ts\":%lu,"
         "\"config_type\":\"%s\","
         "\"error_code\":\"%s\","
         "\"detail\":\"%s\"}",
-        kx_system_device_id(),
+        KX_DEVICE_UUID,
         (unsigned long)time(NULL),
         config_type,
         error_code,
         detail);
-    kx_mqtt_publish(topic, payload, 1, 0);
+    kx_mqtt_publish(KX_TOPIC_CONFIG_ERROR, payload, 1, 0);
     ESP_LOGW(TAG, "error '%s' for '%s': %s", error_code, config_type, detail);
 }
 
