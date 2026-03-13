@@ -6,6 +6,8 @@
 #include "cJSON.h"
 #include <stdio.h>
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <time.h>
 
 static const char *TAG = "kx_config";
@@ -47,8 +49,9 @@ static void _send_error(const char *config_type,
 // ── Determina el tipo de config por el topic ──────────────────
 static const char *_config_type_from_topic(const char *topic)
 {
-    if (strstr(topic, "/config/device"))   return "device";
-    if (strstr(topic, "/config/controls")) return "controls";
+    if (strstr(topic, "/entities")) return "entities";
+    if (strstr(topic, "/controls")) return "controls";
+    if (strstr(topic, KX_DEVICE_UUID) && !strstr(topic, "/controls")) return "device";
     return "unknown";
 }
 
@@ -57,18 +60,64 @@ static const char *_config_type_from_topic(const char *topic)
 // En Fase 2: validar todos los campos y aplicarlos.
 static esp_err_t _validate_device_config(cJSON *root)
 {
-    if (!cJSON_GetObjectItem(root, "device_id")) {
+    if (!cJSON_GetObjectItem(root, "uuid")) {
         return ESP_FAIL;  // MISSING_FIELD
     }
     // TODO Fase 2: validar fw_version, platform, etc.
     return ESP_OK;
 }
 
+static void _request_entities(int control_id)
+{
+    char topic[128];
+    char payload[128];
+
+    // topic: {uuid}/controls/{control_id}/entities
+    snprintf(topic, sizeof(topic),
+             KX_DEVICE_UUID "/controls/%d/entities",
+             control_id);
+
+    snprintf(payload, sizeof(payload),
+             "{\"_type\": \"entities-discovery\", \"timestamp\": %.3f}",
+             (double)esp_timer_get_time() / 1000000.0);
+
+    esp_err_t err = kx_mqtt_publish(topic, payload, 1, 0); 
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "entities-discovery → control_id=%d", control_id);
+    } else {
+        ESP_LOGW(TAG, "entities-discovery failed → control_id=%d", control_id);
+    }
+}
+
 static esp_err_t _validate_controls_config(cJSON *root)
 {
-    // En MVP: solo verificar que sea un objeto o array válido
-    // TODO Fase 2: iterar controles, validar tipos, aplicar límites
-    (void)root;
+    cJSON *controls = cJSON_GetObjectItem(root, "controls");
+    if (!controls || !cJSON_IsArray(controls)) {
+        ESP_LOGW(TAG, "controls: missing or not an array");
+        return ESP_FAIL;
+    }
+
+    int count = cJSON_GetArraySize(controls);
+    ESP_LOGI(TAG, "controls received: %d", count);
+
+    for (int i = 0; i < count; i++) {
+        cJSON *ctrl = cJSON_GetArrayItem(controls, i);
+        if (!ctrl) continue;
+
+        cJSON *id = cJSON_GetObjectItem(ctrl, "control_id");
+        if (!id) id = cJSON_GetObjectItem(ctrl, "id");
+        if (!id || !cJSON_IsNumber(id)) {
+            ESP_LOGW(TAG, "control[%d]: missing id, skipping", i);
+            continue;
+        }
+
+        int control_id = (int)id->valuedouble;
+        ESP_LOGI(TAG, "control[%d]: id=%d → launching discovery", i, control_id);
+
+        _request_entities(control_id);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
     return ESP_OK;
 }
 
@@ -107,6 +156,10 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
         }
     } else if (strcmp(config_type, "controls") == 0) {
         err = _validate_controls_config(root);
+    }else if (strcmp(config_type, "entities") == 0) {
+        ESP_LOGI(TAG, "entities received for topic: %s", topic);
+        _send_ack(config_type);
+        return;
     } else {
         ESP_LOGW(TAG, "unknown config type in topic: %s", topic);
         cJSON_Delete(root);

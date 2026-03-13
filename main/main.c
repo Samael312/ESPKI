@@ -1,7 +1,7 @@
 #include "kx_config.h"
 #include "kx_system.h"
 #include "kx_mqtt.h"
-
+#include "kx_config_handler.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -90,6 +90,16 @@ static esp_err_t _wifi_init_sta(void)
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
     ESP_LOGI(TAG, "msg: topic=%s payload=%.*s", topic, (int)len, payload);
+
+    if (strstr(topic, "/controls")) {
+        kx_config_handle(topic, payload, len);
+        return;
+    }
+
+    if (strstr(topic, KX_DEVICE_UUID) && !strstr(topic, "/controls")) {
+        kx_config_handle(topic, payload, len);
+        return;
+    }
 }
 
 void app_main(void)

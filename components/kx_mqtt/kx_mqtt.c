@@ -2,6 +2,7 @@
 #include "kx_system.h"
 #include "../../main/kx_config.h"
 #include "mqtt_client.h"
+#include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -37,20 +38,24 @@ static void _publish_status(const char *status)
 
 static void _subscribe_all(void)
 {
-    ESP_LOGI(TAG, "subscribing 1: [%s] len=%d", 
-             KX_TOPIC_CONFIG_DEVICE, strlen(KX_TOPIC_CONFIG_DEVICE));
-    esp_mqtt_client_subscribe(s_client, KX_TOPIC_CONFIG_DEVICE, 0);
+    esp_mqtt_client_subscribe(s_client, "+/" KX_DEVICE_UUID, 0);
+    ESP_LOGI(TAG, "subscribed: +/%s", KX_DEVICE_UUID);
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    ESP_LOGI(TAG, "subscribing 2: [%s] len=%d", 
-             KX_TOPIC_CONFIG_CONTROLS, strlen(KX_TOPIC_CONFIG_CONTROLS));
-    esp_mqtt_client_subscribe(s_client, KX_TOPIC_CONFIG_CONTROLS, 0);
+    esp_mqtt_client_subscribe(s_client, "+/" KX_DEVICE_UUID "/controls", 0);
+    ESP_LOGI(TAG, "subscribed: +/%s/controls", KX_DEVICE_UUID);
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    ESP_LOGI(TAG, "subscribing 3: [%s] len=%d", 
-             KX_TOPIC_CONFIG_ENTITIES, strlen(KX_TOPIC_CONFIG_ENTITIES));
-    esp_mqtt_client_subscribe(s_client, KX_TOPIC_CONFIG_ENTITIES, 0);
+    esp_mqtt_client_subscribe(s_client, "+/" KX_DEVICE_UUID "/controls/+", 0);
+    ESP_LOGI(TAG, "subscribed: +/%s/controls/+", KX_DEVICE_UUID);
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    esp_mqtt_client_subscribe(s_client, "+/" KX_DEVICE_UUID "/controls/+/entities", 0);
+    ESP_LOGI(TAG, "subscribed: +/%s/controls/+/entities", KX_DEVICE_UUID);
+    vTaskDelay(pdMS_TO_TICKS(200));
 }
+
+
 // ── Event handler ─────────────────────────────────────────────
 static void _mqtt_event_handler(void *arg, esp_event_base_t base,
                                 int32_t event_id, void *event_data)
@@ -81,8 +86,8 @@ static void _mqtt_event_handler(void *arg, esp_event_base_t base,
     case MQTT_EVENT_DATA:
         if (s_msg_cb && ev->topic_len > 0) {
             // Los buffers de esp-mqtt no son null-terminated: copiar
-            char topic[128] = {0};
-            char payload[KX_PAYLOAD_MAX_BYTES + 1];
+            char topic[MQTT_MAX_TOPIC_SIZE] = {0};
+            char payload[KX_PAYLOAD_MAX_BYTES];
             size_t tlen = ev->topic_len < sizeof(topic) - 1
                           ? ev->topic_len : sizeof(topic) - 1;
             size_t plen = ev->data_len < KX_PAYLOAD_MAX_BYTES
@@ -121,18 +126,14 @@ esp_err_t kx_mqtt_start(kx_mqtt_msg_cb_t on_message)
         KX_DEVICE_UUID);
 
     // Client ID
-    char client_id[32];
-    snprintf(client_id, sizeof(client_id), "kx_%s", kx_system_device_id());
+    char client_id[64];
+    snprintf(client_id, sizeof(client_id), "%s", KX_DEVICE_UUID);
 
     esp_mqtt_client_config_t cfg = {
     .broker.address.uri            = KX_MQTT_BROKER_URI,
     .credentials.client_id         = client_id,
-
-    // ── Autenticación ────────────────────────────────────────
-    // Desactivado para pruebas con allow_anonymous
-    // Activar en producción:
-    // .credentials.username                    = KX_MQTT_USERNAME,
-    // .credentials.authentication.password     = KX_MQTT_PASSWORD,
+    .credentials.username                    = KX_MQTT_USERNAME,
+    .credentials.authentication.password     = KX_MQTT_PASSWORD,
 
     // ── TLS ──────────────────────────────────────────────────
     // OPCIÓN A: sin TLS (desarrollo local, allow_anonymous)
@@ -142,14 +143,7 @@ esp_err_t kx_mqtt_start(kx_mqtt_msg_cb_t on_message)
     // OPCIÓN B: TLS con CA reconocida (Let's Encrypt)
     // → cambiar URI a  mqtts://host:8883
     // → descomentar las dos líneas siguientes:
-    // .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
-
-    // OPCIÓN C: TLS con certificado autofirmado
-    // → cambiar URI a  mqtts://host:8883
-    // → embed el .pem en CMakeLists con EMBED_TXTFILES
-    // → descomentar las dos líneas siguientes:
-    // .broker.verification.certificate     = (const char *)broker_ca_pem_start,
-    // .broker.verification.certificate_len = broker_ca_pem_end - broker_ca_pem_start,
+    .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
 
     // ── Sesión ───────────────────────────────────────────────
     .session.keepalive          = KX_MQTT_KEEPALIVE_S,

@@ -7,4 +7,5 @@ idf_component_register(
         esp_event
         freertos
         esp_timer
+        mbedtls     
 )

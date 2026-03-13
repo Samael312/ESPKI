@@ -4,6 +4,7 @@ idf_component_register(
     REQUIRES
         kx_system
         kx_mqtt
+        kx_config
         nvs_flash
         esp_wifi
         esp_netif
