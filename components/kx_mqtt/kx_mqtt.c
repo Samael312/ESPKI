@@ -204,32 +204,35 @@ esp_err_t kx_mqtt_start(kx_mqtt_msg_cb_t on_message)
     snprintf(client_id, sizeof(client_id), "%s", KX_DEVICE_UUID);
 
     esp_mqtt_client_config_t cfg = {
-    .broker.address.uri            = KX_MQTT_BROKER_URI,
-    .credentials.client_id         = client_id,
-    .credentials.username                    = KX_MQTT_USERNAME,
-    .credentials.authentication.password     = KX_MQTT_PASSWORD,
+        .broker.address.uri            = KX_MQTT_BROKER_URI,
+        .credentials.client_id         = client_id,
+        .credentials.username          = KX_MQTT_USERNAME,
+        .credentials.authentication.password = KX_MQTT_PASSWORD,
 
-    // ── TLS ──────────────────────────────────────────────────
-    // OPCIÓN A: sin TLS (desarrollo local, allow_anonymous)
-    // → usar URI  mqtt://host:1883   ← activo ahora
-    // No hay nada que configurar aquí.
+        // ── TLS ──────────────────────────────────────────────────
+        // OPCIÓN A: sin TLS (desarrollo local, allow_anonymous)
+        // → usar URI  mqtt://host:1883
+        // No hay nada que configurar aquí.
 
-    // OPCIÓN B: TLS con CA reconocida (Let's Encrypt)
-    // → cambiar URI a  mqtts://host:8883
-    // → descomentar las dos líneas siguientes:
-    .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
+        // OPCIÓN B: TLS con CA reconocida (Let's Encrypt)
+        // → cambiar URI a  mqtts://host:8883
+        // → descomentar la línea siguiente:
+        .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
 
-    // ── Sesión ───────────────────────────────────────────────
-    .session.keepalive          = KX_MQTT_KEEPALIVE_S,
-    .session.last_will.topic    = s_lwt_topic,
-    .session.last_will.msg      = s_lwt_payload,
-    .session.last_will.qos      = 1,
-    .session.last_will.retain   = 1,
+        // ── Sesión ───────────────────────────────────────────────
+        .session.keepalive          = KX_MQTT_KEEPALIVE_S,
+        .session.last_will.topic    = s_lwt_topic,
+        .session.last_will.msg      = s_lwt_payload,
+        .session.last_will.qos      = 1,
+        .session.last_will.retain   = 1,
 
-    // ── Red ──────────────────────────────────────────────────
-    .network.reconnect_timeout_ms = KX_MQTT_RECONNECT_MIN_MS,
-    .buffer.size                  = KX_PAYLOAD_MAX_BYTES,
-};
+        // ── Red ──────────────────────────────────────────────────
+        .network.reconnect_timeout_ms = KX_MQTT_RECONNECT_MIN_MS,
+
+        // ── Buffers ───────────────────────────────────────────────
+
+        .buffer.size     = KX_PAYLOAD_MAX_BYTES,
+    };
 
     s_client = esp_mqtt_client_init(&cfg);
     if (!s_client) {

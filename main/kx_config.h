@@ -41,7 +41,7 @@
 #define KX_TASK_PRIO_SUPERVISION 6
 
 // ── Payload ───────────────────────────────────────────────────
-#define KX_PAYLOAD_MAX_BYTES     8192
+#define KX_PAYLOAD_MAX_BYTES     40960
 #define MQTT_MAX_TOPIC_SIZE      1024
 
 // ── Identidad ─────────────────────────────────────────────────
