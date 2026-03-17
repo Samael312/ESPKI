@@ -1,6 +1,7 @@
 #include "kx_mqtt.h"
 #include "kx_system.h"
 #include "../../main/kx_config.h"
+#include "esp_heap_caps.h"
 #include "mqtt_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
@@ -23,6 +24,11 @@ static volatile bool            s_connected = false;
 static char s_lwt_topic[64];
 static char s_lwt_payload[128];
 
+// ── Buffers para recepción fragmentada ─────────────────────────
+static char   *s_rx_buf     = NULL;
+static int     s_rx_total   = 0;
+static int     s_rx_written = 0;
+static char    s_rx_topic[128] = {0};
 
 // ── Publica connection/status ─────────────────────────────────
 static void _publish_status(const char *status)
@@ -84,19 +90,87 @@ static void _mqtt_event_handler(void *arg, esp_event_base_t base,
         break;
 
     case MQTT_EVENT_DATA:
-        if (s_msg_cb && ev->topic_len > 0) {
-            // Los buffers de esp-mqtt no son null-terminated: copiar
-            char topic[MQTT_MAX_TOPIC_SIZE] = {0};
-            char payload[KX_PAYLOAD_MAX_BYTES];
-            size_t tlen = ev->topic_len < sizeof(topic) - 1
-                          ? ev->topic_len : sizeof(topic) - 1;
-            size_t plen = ev->data_len < KX_PAYLOAD_MAX_BYTES
-                          ? ev->data_len : KX_PAYLOAD_MAX_BYTES;
-            memcpy(topic,   ev->topic, tlen);
-            memcpy(payload, ev->data,  plen);
-            payload[plen] = '\0';
-            ESP_LOGD(TAG, "RX topic=%s len=%d", topic, ev->data_len);
-            s_msg_cb(topic, payload, plen);
+        if (ev->topic_len > 0) {
+            size_t tlen = ev->topic_len < sizeof(s_rx_topic) - 1
+                        ? ev->topic_len : sizeof(s_rx_topic) - 1;
+            memcpy(s_rx_topic, ev->topic, tlen);
+            s_rx_topic[tlen] = '\0';
+
+            if (s_rx_buf) {
+                free(s_rx_buf);
+                s_rx_buf = NULL;
+            }
+
+            s_rx_total   = ev->total_data_len;
+            s_rx_written = 0;
+
+            uint32_t available = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+            ESP_LOGI(TAG, "RX start topic=%s total=%d heap=%lu",
+                    s_rx_topic, s_rx_total, (unsigned long)available);
+
+            s_rx_buf = malloc(s_rx_total + 1);
+            if (!s_rx_buf) {
+                // intentar con lo que haya dejando 10 KB de margen
+                uint32_t safe = available > 10480 ? available - 10480 : 0;
+                ESP_LOGW(TAG, "OOM: need %d bytes — intentando con %lu bytes",
+                        s_rx_total, (unsigned long)safe);
+                if (safe > 0) {
+                    s_rx_buf = malloc(safe + 1);
+                }
+                if (s_rx_buf) {
+                    s_rx_total = (int)safe;
+                    ESP_LOGW(TAG, "buffer parcial: se almacenarán %d de %d bytes",
+                            s_rx_total, ev->total_data_len);
+                } else {
+                    ESP_LOGE(TAG, "OOM total: no se puede almacenar nada del payload");
+                    s_rx_total = 0;
+                }
+            }
+        }
+
+        // acumular chunk
+        if (s_rx_buf && ev->data && ev->data_len > 0) {
+            int space   = s_rx_total - s_rx_written;
+            int to_copy = ev->data_len < space ? ev->data_len : space;
+            if (to_copy > 0) {
+                memcpy(s_rx_buf + s_rx_written, ev->data, to_copy);
+                s_rx_written += to_copy;
+            }
+            ESP_LOGI(TAG, "recibiendo... %d/%d bytes (%.1f%%)",
+                    ev->current_data_offset + ev->data_len,
+                    ev->total_data_len,
+                    (float)(ev->current_data_offset + ev->data_len) * 100.0f / ev->total_data_len);
+        }
+
+        // último chunk
+        if (ev->current_data_offset + ev->data_len >= ev->total_data_len) {
+            if (s_rx_buf) {
+                s_rx_buf[s_rx_written] = '\0';
+                ESP_LOGI(TAG, "RX complete topic=%s almacenado=%d total=%d heap=%lu%s",
+                        s_rx_topic, s_rx_written, ev->total_data_len,
+                        (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+                        s_rx_written < ev->total_data_len ? " [TRUNCADO]" : "");
+
+                // mostrar lo almacenado en bloques de 200 chars
+                ESP_LOGI(TAG, "── payload almacenado ──────────────────");
+                for (int i = 0; i < s_rx_written; i += 200) {
+                    int chunk = (s_rx_written - i) < 200 ? (s_rx_written - i) : 200;
+                    ESP_LOGI(TAG, "%.*s", chunk, s_rx_buf + i);
+                }
+                ESP_LOGI(TAG, "── fin payload ─────────────────────────");
+
+                if (s_msg_cb) {
+                    s_msg_cb(s_rx_topic, s_rx_buf, s_rx_written);
+                }
+
+                free(s_rx_buf);
+                s_rx_buf = NULL;
+            } else {
+                ESP_LOGE(TAG, "RX complete pero sin buffer — payload descartado");
+            }
+
+            s_rx_total   = 0;
+            s_rx_written = 0;
         }
         break;
 

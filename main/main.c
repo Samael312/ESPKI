@@ -89,14 +89,19 @@ static esp_err_t _wifi_init_sta(void)
 
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
-    ESP_LOGI(TAG, "msg: topic=%s payload=%.*s", topic, (int)len, payload);
+    uint32_t heap_before = kx_system_heap_free();
+    
+    ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap_free=%" PRIu32, 
+             topic, len, heap_before);
+
+    ESP_LOGD(TAG, "Payload: %.*s", (int)len, payload);
 
     if (strstr(topic, "/controls")) {
         kx_config_handle(topic, payload, len);
         return;
     }
 
-    if (strstr(topic, KX_DEVICE_UUID) && !strstr(topic, "/controls")) {
+    if (strstr(topic, KX_DEVICE_UUID)) {
         kx_config_handle(topic, payload, len);
         return;
     }

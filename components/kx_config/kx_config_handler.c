@@ -126,14 +126,28 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
 {
     const char *config_type = _config_type_from_topic(topic);
 
-    // Verificar tamaño antes de parsear
+    // entities: no limitar por tamaño, mostrar lo recibido y salir
+    if (strcmp(config_type, "entities") == 0) {
+        uint32_t heap_before = kx_system_heap_free();
+        ESP_LOGI(TAG, "entities received: topic=%s size=%d heap=%" PRIu32,
+                 topic, (int)len, heap_before);
+        // mostrar payload en bloques de 200 chars
+        for (int i = 0; i < (int)len; i += 200) {
+            int chunk = ((int)len - i) < 200 ? ((int)len - i) : 200;
+            ESP_LOGI(TAG, "%.*s", chunk, payload + i);
+        }
+        ESP_LOGI(TAG, "entities end — heap=%" PRIu32, kx_system_heap_free());
+        _send_ack(config_type);
+        return;
+    }
+
+    // resto de tipos: limitar tamaño
     if (len > KX_PAYLOAD_MAX_BYTES) {
-        ESP_LOGW(TAG, "payload too large (%d bytes)", len);
+        ESP_LOGW(TAG, "payload too large (%d bytes)", (int)len);
         _send_error(config_type, "PARSE_ERROR", "payload exceeds max size");
         return;
     }
 
-    // Parsear JSON
     cJSON *root = cJSON_ParseWithLength(payload, len);
     if (!root) {
         const char *err_ptr = cJSON_GetErrorPtr();
@@ -144,22 +158,16 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
         return;
     }
 
-    // Log de heap antes/después para detectar presión de memoria
     uint32_t heap_before = kx_system_heap_free();
-
-    // Validar según tipo
     esp_err_t err = ESP_OK;
+
     if (strcmp(config_type, "device") == 0) {
         err = _validate_device_config(root);
         if (err != ESP_OK) {
-            _send_error(config_type, "MISSING_FIELD", "device_id required");
+            _send_error(config_type, "MISSING_FIELD", "uuid required");
         }
     } else if (strcmp(config_type, "controls") == 0) {
         err = _validate_controls_config(root);
-    }else if (strcmp(config_type, "entities") == 0) {
-        ESP_LOGI(TAG, "entities received for topic: %s", topic);
-        _send_ack(config_type);
-        return;
     } else {
         ESP_LOGW(TAG, "unknown config type in topic: %s", topic);
         cJSON_Delete(root);
@@ -169,12 +177,10 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
     cJSON_Delete(root);
 
     uint32_t heap_after = kx_system_heap_free();
-    ESP_LOGI(TAG, "config '%s' heap: before=%" PRIu32 " after=%" PRIu32
-             " delta=%d",
+    ESP_LOGI(TAG, "config '%s' heap: before=%" PRIu32 " after=%" PRIu32 " delta=%d",
              config_type, heap_before, heap_after,
              (int)heap_before - (int)heap_after);
 
-    // Advertir si el heap bajó mucho
     if (heap_after < heap_before / 2) {
         ESP_LOGW(TAG, "high memory pressure after config parse!");
     }
@@ -182,5 +188,4 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
     if (err == ESP_OK) {
         _send_ack(config_type);
     }
-    // Si err != ESP_OK el error ya fue enviado arriba
 }
