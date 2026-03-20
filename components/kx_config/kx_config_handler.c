@@ -2,51 +2,45 @@
 #include "kx_system.h"
 #include "kx_mqtt.h"
 #include "../../main/kx_config.h"
+#include "kx_param_store.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "cJSON.h"
-#include <stdio.h>
-#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include <time.h>
 
 static const char *TAG = "kx_config";
 
-// ── Helpers de respuesta ──────────────────────────────────────
 static void _send_ack(const char *config_type)
 {
     char payload[256];
-    // quitar: snprintf(topic, sizeof(topic), KX_TOPIC_CONFIG_ACK, kx_system_device_id());
     snprintf(payload, sizeof(payload),
         "{\"device_id\":\"%s\",\"ts\":%lu,\"config_type\":\"%s\",\"status\":\"ok\"}",
-        KX_DEVICE_UUID,
-        (unsigned long)time(NULL),
-        config_type);
+        KX_DEVICE_UUID, (unsigned long)time(NULL), config_type);
     kx_mqtt_publish(KX_TOPIC_CONFIG_ACK, payload, 1, 0);
     ESP_LOGI(TAG, "ack sent for '%s'", config_type);
 }
 
 static void _send_error(const char *config_type,
-                         const char *error_code,
-                         const char *detail)
+                        const char *error_code,
+                        const char *detail)
 {
     char payload[512];
-    // quitar: snprintf(topic, sizeof(topic), KX_TOPIC_CONFIG_ERROR, kx_system_device_id());
     snprintf(payload, sizeof(payload),
         "{\"device_id\":\"%s\",\"ts\":%lu,"
         "\"config_type\":\"%s\","
         "\"error_code\":\"%s\","
         "\"detail\":\"%s\"}",
-        KX_DEVICE_UUID,
-        (unsigned long)time(NULL),
-        config_type,
-        error_code,
-        detail);
+        KX_DEVICE_UUID, (unsigned long)time(NULL),
+        config_type, error_code, detail);
     kx_mqtt_publish(KX_TOPIC_CONFIG_ERROR, payload, 1, 0);
     ESP_LOGW(TAG, "error '%s' for '%s': %s", error_code, config_type, detail);
 }
 
-// ── Determina el tipo de config por el topic ──────────────────
 static const char *_config_type_from_topic(const char *topic)
 {
     if (strstr(topic, "/entities")) return "entities";
@@ -55,16 +49,48 @@ static const char *_config_type_from_topic(const char *topic)
     return "unknown";
 }
 
-// ── Validación mínima de device config ───────────────────────
-// En MVP solo comprobamos que el JSON parsea y tiene campo "device_id"
-// En Fase 2: validar todos los campos y aplicarlos.
+static int _control_id_from_topic(const char *topic)
+{
+    const char *p = strstr(topic, "/controls/");
+    if (!p) return -1;
+    p += strlen("/controls/");
+    return atoi(p);
+}
+
 static esp_err_t _validate_device_config(cJSON *root)
 {
-    if (!cJSON_GetObjectItem(root, "uuid")) {
-        return ESP_FAIL;  // MISSING_FIELD
-    }
-    // TODO Fase 2: validar fw_version, platform, etc.
+    if (!cJSON_GetObjectItem(root, "uuid")) return ESP_FAIL;
     return ESP_OK;
+}
+
+static void _publish_control_status(int control_id, const char *uuid)
+{
+    char topic[128];
+    char payload[256];
+
+    snprintf(topic, sizeof(topic),
+             "%s/controls/%d/status",
+             KX_DEVICE_UUID, control_id);
+
+    snprintf(payload, sizeof(payload),
+        "{"
+        "\"_type\": \"control-status\","
+        "\"id\": %d,"
+        "\"uuid\": \"%s\","
+        "\"connection_status\": \"online\","
+        "\"link\": {\"detected\": \"online\"},"
+        "\"timestamp\": %.3f"
+        "}",
+        control_id, uuid,
+        (double)esp_timer_get_time() / 1000000.0);
+
+    esp_err_t err = kx_mqtt_publish(topic, payload, 1, 0);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "control-status online → ctrl=%d uuid=%s",
+                 control_id, uuid);
+    } else {
+        ESP_LOGW(TAG, "control-status publish failed → ctrl=%d", control_id);
+    }
 }
 
 static void _request_entities(int control_id)
@@ -72,16 +98,14 @@ static void _request_entities(int control_id)
     char topic[128];
     char payload[128];
 
-    // topic: {uuid}/controls/{control_id}/entities
     snprintf(topic, sizeof(topic),
-             KX_DEVICE_UUID "/controls/%d/entities",
-             control_id);
+             KX_DEVICE_UUID "/controls/%d/entities", control_id);
 
     snprintf(payload, sizeof(payload),
              "{\"_type\": \"entities-discovery\", \"timestamp\": %.3f}",
              (double)esp_timer_get_time() / 1000000.0);
 
-    esp_err_t err = kx_mqtt_publish(topic, payload, 1, 0); 
+    esp_err_t err = kx_mqtt_publish(topic, payload, 1, 0);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "entities-discovery → control_id=%d", control_id);
     } else {
@@ -100,6 +124,8 @@ static esp_err_t _validate_controls_config(cJSON *root)
     int count = cJSON_GetArraySize(controls);
     ESP_LOGI(TAG, "controls received: %d", count);
 
+    kx_mqtt_resize_queue(count);
+
     for (int i = 0; i < count; i++) {
         cJSON *ctrl = cJSON_GetArrayItem(controls, i);
         if (!ctrl) continue;
@@ -110,9 +136,18 @@ static esp_err_t _validate_controls_config(cJSON *root)
             ESP_LOGW(TAG, "control[%d]: missing id, skipping", i);
             continue;
         }
-
         int control_id = (int)id->valuedouble;
-        ESP_LOGI(TAG, "control[%d]: id=%d → launching discovery", i, control_id);
+
+        char uuid[64] = "";
+        cJSON *u = cJSON_GetObjectItem(ctrl, "uuid");
+        if (u && cJSON_IsString(u)) {
+            snprintf(uuid, sizeof(uuid), "%s", u->valuestring);
+        }
+
+        ESP_LOGI(TAG, "control[%d]: id=%d uuid=%s", i, control_id, uuid);
+
+        _publish_control_status(control_id, uuid);
+        vTaskDelay(pdMS_TO_TICKS(50));
 
         _request_entities(control_id);
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -126,22 +161,33 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
 {
     const char *config_type = _config_type_from_topic(topic);
 
-    // entities: no limitar por tamaño, mostrar lo recibido y salir
+    // ── entities ─────────────────────────────────────────────
     if (strcmp(config_type, "entities") == 0) {
         uint32_t heap_before = kx_system_heap_free();
         ESP_LOGI(TAG, "entities received: topic=%s size=%d heap=%" PRIu32,
                  topic, (int)len, heap_before);
-        // mostrar payload en bloques de 200 chars
-        for (int i = 0; i < (int)len; i += 200) {
-            int chunk = ((int)len - i) < 200 ? ((int)len - i) : 200;
-            ESP_LOGI(TAG, "%.*s", chunk, payload + i);
+
+        if (len > 200) {
+            ESP_LOGI(TAG, "payload start: %.100s", payload);
+            ESP_LOGI(TAG, "payload end:   %.100s", payload + len - 100);
+        } else {
+            ESP_LOGI(TAG, "payload: %.*s", (int)len, payload);
         }
+
+        // parsear y almacenar en kx_param_store
+        int control_id = _control_id_from_topic(topic);
+        if (control_id > 0) {
+            kx_param_store_parse(payload, len, control_id);
+        } else {
+            ESP_LOGW(TAG, "could not extract control_id from topic: %s", topic);
+        }
+
         ESP_LOGI(TAG, "entities end — heap=%" PRIu32, kx_system_heap_free());
         _send_ack(config_type);
         return;
     }
 
-    // resto de tipos: limitar tamaño
+    // ── resto de tipos: limitar tamaño ────────────────────────
     if (len > KX_PAYLOAD_MAX_BYTES) {
         ESP_LOGW(TAG, "payload too large (%d bytes)", (int)len);
         _send_error(config_type, "PARSE_ERROR", "payload exceeds max size");

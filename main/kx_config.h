@@ -22,7 +22,7 @@
 //#define KX_MQTT_USERNAME      ""
 //#define KX_MQTT_PASSWORD      ""
 
-#define KX_MQTT_KEEPALIVE_S       60
+#define KX_MQTT_KEEPALIVE_S       120
 #define KX_MQTT_RECONNECT_MIN_MS  5000
 #define KX_MQTT_RECONNECT_MAX_MS  60000
 
@@ -55,7 +55,7 @@
 #define KX_TOPIC_CONFIG_ENTITIES        "+/" KX_DEVICE_UUID "/controls/+/entities"
 
 // ── Topics salientes (dispositivo → broker) ───────────────────
-#define KX_TOPIC_STATUS       KX_TOPIC_PREFIX "/" KX_DEVICE_UUID "/connection/status"
+#define KX_TOPIC_STATUS       KX_DEVICE_UUID "/connection/status"
 #define KX_TOPIC_TELEMETRY    KX_TOPIC_PREFIX "/" KX_DEVICE_UUID "/telemetry"
 #define KX_TOPIC_CONFIG_ACK   KX_TOPIC_PREFIX "/" KX_DEVICE_UUID "/config/ack"
 #define KX_TOPIC_CONFIG_ERROR KX_TOPIC_PREFIX "/" KX_DEVICE_UUID "/config/error"

@@ -1,6 +1,6 @@
 #pragma once
 #include "esp_err.h"
-#include <stdbool.h>    
+#include <stdbool.h>
 #include <stddef.h>
 
 // =============================================================
@@ -13,8 +13,7 @@ typedef void (*kx_mqtt_msg_cb_t)(const char *topic, const char *payload, size_t 
 // Inicia el cliente MQTT. Debe llamarse tras kx_net_start().
 esp_err_t kx_mqtt_start(kx_mqtt_msg_cb_t on_message);
 
-// Publica un mensaje. Bloqueante (espera ACK QoS1) si qos=1.
-// Devuelve ESP_OK o ESP_FAIL si la cola está llena.
+// Publica un mensaje.
 esp_err_t kx_mqtt_publish(const char *topic, const char *payload, int qos, int retain);
 
 // Suscribe a un topic
@@ -22,3 +21,6 @@ esp_err_t kx_mqtt_subscribe(const char *topic, int qos);
 
 // True si el cliente está conectado al broker
 bool kx_mqtt_is_connected(void);
+
+// Redimensiona la cola según el número de controles esperados
+void kx_mqtt_resize_queue(int num_controls);

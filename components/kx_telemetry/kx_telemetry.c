@@ -4,95 +4,126 @@
 #include "../../main/kx_config.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
-#include <math.h>
-#include <time.h>
 
 static const char *TAG = "kx_telemetry";
 
-// ── RSSI ──────────────────────────────────────────────────────
 static int8_t _get_rssi(void)
 {
     wifi_ap_record_t ap;
-    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-        return ap.rssi;
-    }
-    return 0;  // 0 = no disponible
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) return ap.rssi;
+    return 0;
 }
 
-// ── Datos dummy deterministas ─────────────────────────────────
-// counter  = seq incremental
-// wave     = sin(seq * 15°) → ciclo completo cada 24 muestras
-// fixed    = 1.0 siempre (referencia)
-static void _build_payload(char *buf, size_t len, uint32_t seq)
+static double _ts(void)
 {
-    double wave = sin((double)seq * M_PI / 12.0);  // 15° = π/12 rad
-
-    snprintf(buf, len,
-        "{"
-        "\"device_id\":\"%s\","
-        "\"ts\":%lu,"
-        "\"seq\":%" PRIu32 ","
-        "\"uptime_s\":%" PRIu32 ","
-        "\"rssi\":%d,"
-        "\"heap_free\":%" PRIu32 ","
-        "\"fw_ver\":\"%s\","
-        "\"reset_reason\":\"%s\","
-        "\"payload\":{"
-            "\"counter\":%" PRIu32 ","
-            "\"wave\":%.4f,"
-            "\"fixed\":1.0"
-        "}"
-        "}",
-        kx_system_device_id(),
-        (unsigned long)time(NULL),
-        seq,
-        kx_system_uptime_s(),
-        (int)_get_rssi(),
-        kx_system_heap_free(),
-        KX_FW_VERSION,
-        kx_system_reset_reason(),
-        seq,
-        wave
-    );
+    return (double)esp_timer_get_time() / 1000000.0;
 }
 
-// ── Tarea ─────────────────────────────────────────────────────
+// topic: {uuid}/controls/{control_id}/status
+void kx_control_pub_status(int control_id, const char *uuid,
+                            const char *connection_status)
+{
+    char topic[128];
+    char payload[256];
+
+    snprintf(topic, sizeof(topic),
+             "%s/controls/%d/status",
+             KX_DEVICE_UUID, control_id);
+
+    snprintf(payload, sizeof(payload),
+        "{"
+        "\"_type\": \"control-status\","
+        "\"id\": %d,"
+        "\"uuid\": \"%s\","
+        "\"connection_status\": \"%s\","
+        "\"link\": {\"detected\": \"%s\"},"
+        "\"timestamp\": %.3f"
+        "}",
+        control_id,
+        uuid,
+        connection_status,
+        connection_status,
+        _ts()
+    );
+
+    kx_mqtt_publish(topic, payload, 1, 0);
+}
+
+// ── Publica el valor de un param ──────────────────────────────
+
+void kx_param_pub_status(int control_id, int param_id, float value)
+{
+    char topic[128];
+    char payload[128];
+
+    snprintf(topic, sizeof(topic),
+             "%s/controls/%d/entities/%d/status",
+             KX_DEVICE_UUID, control_id, param_id);
+
+    snprintf(payload, sizeof(payload),
+             "{\"id\":%d,\"value\":%.3f,\"ts\":%.3f}",
+             param_id, value, _ts());
+
+    kx_mqtt_publish(topic, payload, 0, 0);
+}
+
+void kx_param_pub_set(int control_id, int param_id, float value)
+{
+    char topic[128];
+    char payload[128];
+
+    snprintf(topic, sizeof(topic),
+             "%s/controls/%d/entities/%d/set",
+             KX_DEVICE_UUID, control_id, param_id);
+
+    snprintf(payload, sizeof(payload),
+             "{\"id\":%d,\"value\":%.3f,\"ts\":%.3f}",
+             param_id, value, _ts());
+
+    kx_mqtt_publish(topic, payload, 0, 0);
+}
+
+void kx_param_pub_error(int control_id, int param_id, const char *msg)
+{
+    char topic[128];
+    char payload[256];
+
+    snprintf(topic, sizeof(topic),
+             "%s/controls/%d/entities/%d/status",
+             KX_DEVICE_UUID, control_id, param_id);
+
+    snprintf(payload, sizeof(payload),
+             "{\"id\":%d,\"error\":true,\"error_message\":\"%s\",\"ts\":%.3f}",
+             param_id, msg, _ts());
+
+    kx_mqtt_publish(topic, payload, 0, 0);
+}
+
+// ── Tarea principal ───────────────────────────────────────────
+// No hace nada por sí sola — el protocolo llama a kx_param_pub_*
+// cuando tiene un valor listo. Esta tarea solo loguea el estado.
 static void _telemetry_task(void *arg)
 {
-    char topic[64];
-    char payload[KX_PAYLOAD_MAX_BYTES];
     uint32_t seq = 0;
 
-    snprintf(topic, sizeof(topic), "%s", KX_TOPIC_TELEMETRY);
-
-    ESP_LOGI(TAG, "task started, interval=%ds", KX_TELEMETRY_INTERVAL_S);
+    ESP_LOGI(TAG, "task started");
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(KX_TELEMETRY_INTERVAL_S * 1000));
+        vTaskDelay(pdMS_TO_TICKS(10000));  // log de estado cada 10 s
 
-        if (!kx_mqtt_is_connected()) {
-            ESP_LOGD(TAG, "skip: mqtt not connected");
-            continue;
-        }
-
-        _build_payload(payload, sizeof(payload), seq);
-
-        esp_err_t err = kx_mqtt_publish(topic, payload, 0 /* QoS 0 */, 0);
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "published seq=%" PRIu32 " heap=%" PRIu32,
-                     seq, kx_system_heap_free());
-            seq++;
-        } else {
-            ESP_LOGW(TAG, "publish failed seq=%" PRIu32, seq);
-            // No incrementa seq para que el receptor detecte la laguna
-        }
+        ESP_LOGI(TAG, "alive seq=%" PRIu32 " heap=%" PRIu32 " rssi=%d mqtt=%s",
+                 seq,
+                 kx_system_heap_free(),
+                 (int)_get_rssi(),
+                 kx_mqtt_is_connected() ? "connected" : "disconnected");
+        seq++;
     }
 }
 
-// ── API pública ───────────────────────────────────────────────
 esp_err_t kx_telemetry_start(void)
 {
     BaseType_t ret = xTaskCreate(

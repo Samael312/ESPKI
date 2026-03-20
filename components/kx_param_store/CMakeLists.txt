@@ -1,12 +1,10 @@
 idf_component_register(
-    SRCS "kx_config_handler.c"
+    SRCS "kx_param_store.c"
     INCLUDE_DIRS "."
     REQUIRES
-        kx_system
-        kx_mqtt
-        kx_param_store
-        freertos
         esp_timer
+        freertos
+        heap
     PRIV_REQUIRES
         json
 )

@@ -2,6 +2,8 @@
 #include "kx_system.h"
 #include "kx_mqtt.h"
 #include "kx_config_handler.h"
+#include "kx_telemetry.h"
+#include "kx_dummy_protocol.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -19,6 +21,7 @@ static const char *TAG = "main";
 static EventGroupHandle_t s_wifi_events;
 static int s_wifi_retry = 0;
 
+// ── WiFi event handler ────────────────────────────────────────
 static void _wifi_event_handler(void *arg, esp_event_base_t base,
                                 int32_t id, void *data)
 {
@@ -46,6 +49,7 @@ static void _wifi_event_handler(void *arg, esp_event_base_t base,
     }
 }
 
+// ── WiFi init ─────────────────────────────────────────────────
 static esp_err_t _wifi_init_sta(void)
 {
     s_wifi_events = xEventGroupCreate();
@@ -87,14 +91,14 @@ static esp_err_t _wifi_init_sta(void)
     return ESP_FAIL;
 }
 
+// ── Router de mensajes MQTT entrantes ─────────────────────────
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
     uint32_t heap_before = kx_system_heap_free();
-    
-    ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap_free=%" PRIu32, 
-             topic, len, heap_before);
 
-    ESP_LOGD(TAG, "Payload: %.*s", (int)len, payload);
+    ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
+             topic, len, heap_before);
+    ESP_LOGD(TAG, "payload: %.*s", (int)len, payload);
 
     if (strstr(topic, "/controls")) {
         kx_config_handle(topic, payload, len);
@@ -105,23 +109,37 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
         kx_config_handle(topic, payload, len);
         return;
     }
+
+    ESP_LOGW(TAG, "unhandled topic: %s", topic);
 }
 
+// ── app_main ──────────────────────────────────────────────────
 void app_main(void)
 {
+    // 1. sistema base: NVS, device_id, boot count
     ESP_ERROR_CHECK(kx_system_init());
 
+    // 2. WiFi — bloqueante hasta IP o timeout
     if (_wifi_init_sta() != ESP_OK) {
         ESP_LOGE(TAG, "no WiFi, rebooting in 10s");
         vTaskDelay(pdMS_TO_TICKS(10000));
         esp_restart();
     }
 
+    // 3. MQTT — publica device-status, suscribe topics
     ESP_ERROR_CHECK(kx_mqtt_start(_on_mqtt_message));
 
-    ESP_LOGI(TAG, "init done — device_id=%s", kx_system_device_id());
+    // 4. Telemetría — tarea de publicación de estado
+    //ESP_ERROR_CHECK(kx_telemetry_start());
 
-    // loop de diagnóstico mínimo mientras no hay tareas
+    // 5. Protocolo dummy — simula lecturas de campo hasta Fase 2
+    //    En Fase 2: sustituir por kx_modbus_start()
+    //ESP_ERROR_CHECK(kx_dummy_protocol_start());
+
+    ESP_LOGI(TAG, "init done — device_id=%s fw=%s",
+             kx_system_device_id(), KX_FW_VERSION);
+
+    // loop de diagnóstico
     while (1) {
         ESP_LOGI(TAG, "heap=%lu mqtt=%s",
                  (unsigned long)kx_system_heap_free(),
