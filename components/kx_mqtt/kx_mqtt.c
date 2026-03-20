@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 
 static const char *TAG = "kx_mqtt";
 
@@ -57,6 +58,15 @@ static QueueHandle_t s_msg_queue = NULL;
 // ── Forward declarations ──────────────────────────────────────
 static void _track_control_from_topic(const char *topic);
 static void _log_controls_list(void);
+
+
+
+static double _ts(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
 
 // ── Redimensionar cola ────────────────────────────────────────
 void kx_mqtt_resize_queue(int num_controls)
@@ -210,7 +220,7 @@ static void _publish_device_status_online(void)
         ip_str,
         KX_FW_VERSION,
         KX_DEVICE_UUID,
-        (double)esp_timer_get_time() / 1000000.0
+        _ts()
     );
 
     esp_mqtt_client_publish(s_client, topic, payload, 0, 1, 1);

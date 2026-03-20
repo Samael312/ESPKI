@@ -8,6 +8,7 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"    // ← correcto en IDF 5.x
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -20,6 +21,14 @@ static const char *TAG = "main";
 
 static EventGroupHandle_t s_wifi_events;
 static int s_wifi_retry = 0;
+
+// ── NTP ───────────────────────────────────────────────────────
+static void _ntp_init(void)
+{
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&config);
+    ESP_LOGI(TAG, "NTP sync started");
+}
 
 // ── WiFi event handler ────────────────────────────────────────
 static void _wifi_event_handler(void *arg, esp_event_base_t base,
@@ -126,20 +135,21 @@ void app_main(void)
         esp_restart();
     }
 
-    // 3. MQTT — publica device-status, suscribe topics
+    // 3. NTP — sincronizar hora real
+    _ntp_init();
+
+    // 4. MQTT — publica device-status, suscribe topics
     ESP_ERROR_CHECK(kx_mqtt_start(_on_mqtt_message));
 
-    // 4. Telemetría — tarea de publicación de estado
-    //ESP_ERROR_CHECK(kx_telemetry_start());
+    // 5. Telemetría
+    ESP_ERROR_CHECK(kx_telemetry_start());
 
-    // 5. Protocolo dummy — simula lecturas de campo hasta Fase 2
-    //    En Fase 2: sustituir por kx_modbus_start()
-    //ESP_ERROR_CHECK(kx_dummy_protocol_start());
+    // 6. Protocolo dummy — sustituir por kx_modbus_start() en Fase 2
+    ESP_ERROR_CHECK(kx_dummy_protocol_start());
 
     ESP_LOGI(TAG, "init done — device_id=%s fw=%s",
              kx_system_device_id(), KX_FW_VERSION);
 
-    // loop de diagnóstico
     while (1) {
         ESP_LOGI(TAG, "heap=%lu mqtt=%s",
                  (unsigned long)kx_system_heap_free(),

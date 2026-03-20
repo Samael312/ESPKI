@@ -11,6 +11,18 @@ static const char *TAG = "kx_param_store";
 // ── Almacén dinámico en PSRAM ─────────────────────────────────
 static kx_control_params_t *s_store = NULL;
 static int                   s_count = 0;
+static int s_expected = 0;
+
+void kx_param_store_set_expected(int count)
+{
+    s_expected = count;
+    ESP_LOGI(TAG, "expecting %d controls", count);
+}
+
+bool kx_param_store_is_ready(void)
+{
+    return s_expected > 0 && s_count >= s_expected;
+}
 
 // ── Helpers ───────────────────────────────────────────────────
 static kx_control_params_t *_find_or_create(int control_id)
@@ -153,13 +165,22 @@ esp_err_t kx_param_store_parse(const char *payload, size_t len,
                       ? (float)add->valuedouble : 0.0f;
 
         if (p->param_id > 0) {
-            ESP_LOGD(TAG, "  param %d [%s] reg=%d min=%.2f max=%.2f "
-                     "fr=%d fw=%d",
-                     p->param_id, p->name, p->reg,
-                     p->minvalue, p->maxvalue,
-                     p->function_read, p->function_write);
+            ESP_LOGI(TAG, "  [%d/%d] param_id=%d name=%s min=%.2f max=%.2f fr=%d fw=%d",
+                    ctrl->count + 1, total,
+                    p->param_id, p->name,
+                    p->minvalue, p->maxvalue,
+                    p->function_read, p->function_write);
             ctrl->count++;
         }
+
+        ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        ESP_LOGI(TAG, "control %d: %d params stored", control_id, ctrl->count);
+        for (int i = 0; i < ctrl->count; i++) {
+            ESP_LOGI(TAG, "  param_id=%d [%s]",
+                    ctrl->params[i].param_id,
+                    ctrl->params[i].name);
+        }
+        ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     }
 
     cJSON_Delete(root);

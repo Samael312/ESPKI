@@ -46,3 +46,5 @@ typedef void (*kx_param_iter_cb_t)(int control_id,
                                     const kx_param_t *param,
                                     void *user_data);
 void kx_param_store_foreach(kx_param_iter_cb_t cb, void *user_data);
+void kx_param_store_set_expected(int count);
+bool kx_param_store_is_ready(void);

@@ -12,18 +12,27 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <sys/time.h>
 
 static const char *TAG = "kx_config";
+
+static double _ts(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
 
 static void _send_ack(const char *config_type)
 {
     char payload[256];
     snprintf(payload, sizeof(payload),
-        "{\"device_id\":\"%s\",\"ts\":%lu,\"config_type\":\"%s\",\"status\":\"ok\"}",
-        KX_DEVICE_UUID, (unsigned long)time(NULL), config_type);
+        "{\"device_id\":\"%s\",\"ts\":%.3f,\"config_type\":\"%s\",\"status\":\"ok\"}",
+        KX_DEVICE_UUID, _ts(), config_type);
     kx_mqtt_publish(KX_TOPIC_CONFIG_ACK, payload, 1, 0);
     ESP_LOGI(TAG, "ack sent for '%s'", config_type);
 }
+
 
 static void _send_error(const char *config_type,
                         const char *error_code,
@@ -31,11 +40,11 @@ static void _send_error(const char *config_type,
 {
     char payload[512];
     snprintf(payload, sizeof(payload),
-        "{\"device_id\":\"%s\",\"ts\":%lu,"
+        "{\"device_id\":\"%s\",\"ts\":%.3f,"
         "\"config_type\":\"%s\","
         "\"error_code\":\"%s\","
         "\"detail\":\"%s\"}",
-        KX_DEVICE_UUID, (unsigned long)time(NULL),
+        KX_DEVICE_UUID, _ts(),
         config_type, error_code, detail);
     kx_mqtt_publish(KX_TOPIC_CONFIG_ERROR, payload, 1, 0);
     ESP_LOGW(TAG, "error '%s' for '%s': %s", error_code, config_type, detail);
@@ -82,7 +91,7 @@ static void _publish_control_status(int control_id, const char *uuid)
         "\"timestamp\": %.3f"
         "}",
         control_id, uuid,
-        (double)esp_timer_get_time() / 1000000.0);
+        _ts());
 
     esp_err_t err = kx_mqtt_publish(topic, payload, 1, 0);
     if (err == ESP_OK) {
@@ -103,7 +112,7 @@ static void _request_entities(int control_id)
 
     snprintf(payload, sizeof(payload),
              "{\"_type\": \"entities-discovery\", \"timestamp\": %.3f}",
-             (double)esp_timer_get_time() / 1000000.0);
+             _ts());
 
     esp_err_t err = kx_mqtt_publish(topic, payload, 1, 0);
     if (err == ESP_OK) {
@@ -125,6 +134,7 @@ static esp_err_t _validate_controls_config(cJSON *root)
     ESP_LOGI(TAG, "controls received: %d", count);
 
     kx_mqtt_resize_queue(count);
+    kx_param_store_set_expected(count); 
 
     for (int i = 0; i < count; i++) {
         cJSON *ctrl = cJSON_GetArrayItem(controls, i);
