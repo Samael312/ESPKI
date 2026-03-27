@@ -1,0 +1,266 @@
+ESP32-PoE
+
+This hardware design is made with KiCAD. If you have problems opening the design, try getting newer KiCAD version (probably even latest nightly build).
+
+Hardware revision M1
+---
+
+1. Reverted back the PoE class from class 4 to class 0 due to complaints. Class 4 devices reserve double the power and the minimum consumption is much higher, it makes sense for a device like ESP32-POE2 but not much sense to ESP32-POE or ESP32-POE-ISO. Switching to class 4 was a problem for customers that used one PD for many ESP32-POE devices and now the switch runs out of wattage for same amount of devices.
+
+Hardware revision M
+---
+
+1. Moved design to KiCad 7.x;
+2. PWR switch (U9) chased with TPS2378DDAR(HSOIC-8);
+3. Changed PoE class from class 0 (0.44W to 12.95W) to class 4 (12.95W to 12.95W);
+4. R7 was getting too hot, so we lowered the value and added r42 in parallel with 9.1k values;
+5. Chanaged USB to UART chip to CH340X;
+6. Changed battery charger to TP4054-42-SOT25-R(SOT23-5);
+
+Hardware revision L1
+
+---
+
+Overview: minor design improvements
+
+Notable changes:
+
+1. Lower the battery charge current to 100mA (down from 455mA). Changed R6 from 2.2k to 10k;
+2. U2 changed from TPS2376D(SO-8) to TPS2375D and related resistors no longer placed (R50 and R51). This is because of small differnces between TPS237D and TPS2375D.
+
+---
+
+Hardware revision L
+
+---
+
+Overview: minor design improvements
+
+Notable changes:
+
+U2 changed from TPS2376PW(TSSOP-8) to TPS2376D(SO-8), because of this, U2's package changed from TSSOP-8 to SOIC-8_1.75mm;
+Elements were moved, at the bottom, to free place for the SOIC-8 package.
+
+---
+
+Hardware revision K
+
+---
+
+Overview: minor design improvements
+
+Notable changes:
+
+1. Added voltage divider R50(130k/R0402) / R51(10k/R0402) to set the undervoltage lockout (UVLO) when TPS2376PW is used;
+2. U2 changed from TPS2375PW(TSSOP-8) to TPS2376PW(TSSOP-8).
+
+---
+
+Hardware revision J (internal, not released)
+
+Overview: Major layout changes - bigger size, added mount holes, a lot of other components (buttons, SD card, etc) moved
+
+Notable changes:
+
+1. The board PCB extended with 5mm from 28x75mm to 28x80mm;
+2. Added U8(SN74LVC1G04DBVR(SOT23-5)) and C28(100nF/16V/10%/X7R/C0402), for WROVER-module compatibility. When WROVER is populated, for GPIO17 is then NC and Ethernet's clock will be supplied by GPIO0;
+3. Added R45(10R/R0402) to connect, when populated, I2C-SCL to GPIO33, for WROVER-module compatibility. When WROVER is populated, GPIO16 is also NC;
+4. Added three mounting holes, 2.2mm drills;
+5. BAT1 changed from DW02R to DW02S and rotated;
+6. Both buttons, SD card and many other components moved too;
+7. Added numbering of the layers: 1-F.Cu, 2-In1.Cu, 3-In2.Cu, 4-B.Cu.
+
+
+---
+
+
+Hardware revision I
+
+---
+
+Overview:
+
+- Changed PCB from 2-layer to 4-layer. Inner layer helps cooling down the DCDC.
+
+Notable changes:
+
+1. Added C26 and R43.
+
+---
+
+Hardware revision H1
+
+Overview:
+
+- fixed problems related to boards losing Ethernet connectivity when you draw any current off the board
+
+Notable changes:
+
+1. R33 changed from 4.7 Ohms to 15 Ohms 
+2. Added RC patch betweem the coil and GND. R=22 Ohm and C=220p/110V
+
+---
+
+Hardware revision G1
+
+Overview:
+
+- released, improved behavior during low power modes 
+
+Notable changes:
+
+1. Added resistors R41 and R42(both 3.9k/R1206). Visible in the schematics.
+
+---
+
+Hardware revision G
+
+Overview:
+
+- unreleased, major chages to PoE circuit
+
+Notable changes:
+
+1. The Si3402-B-GM(QFN-20_5x5mm) changed with TPS2375PW(TSSOP-8) + TX4138(ESOIC-8)! Because of this, many related changes:
+
+Deleted: U8, C12, C25, C26, R33, R34, R38, C29, L6, R41, R42, R43, R45, C30, EN_CT1 and EN_CT2
+
+In the schematic added the following elements:
+
+SMAJ58A/SMA as D8
+TX4138(ESOIC-8) as U5
+TPS2375PW(TSSOP-8) as U2
+30.1k/1%/R0402 as R38
+5.23k/1%/R0402 as R34
+4.7R/R0402 as R33
+0.03R/1%/R1206 as R28
+4.42k/1%/1/16W/R0402 as R27
+180k/1%/R0402 as R23
+24.9k/1%/R0402 as R7
+470uF/10V/20%/Low_ESR/RM2.5/6.0x11mm as C25
+12pF/50V/5%/COG/C0402 as C23
+100nF/100V/20%/X7R/C1206 as C12
+
+2. Added D9(1N5819S4(SOD-123)) to protect ESP_EN from 4.2V levels during the process of programming the board;
+3. No PTH pad at MTDI(pin 14);
+4. 7 i 8 krak na LAN_CON1 ste si ostanat vyrzani kym GND kakto si bqha - tova okon4atelno resi Gogo;
+5. Korpusite na PTH elektrolitnite kondenzatori stanaha ot SMD na PTH;
+6. C12 i C24 - 100nF/100V se promeniha v korpus ot 1206 na 0603;
+7. ESP-WROOM-32 se updaitna
+8. pone s 20mils se izliza ot padovete
+9. Sloji se CE.
+10. C20 otide na bot strana.
+11. Kvoto moje se barna.
+12. L3 stana FB0805/600R/2A
+13. mrudnaha se kolkoto e vyzmojno nqkolko pisti, kolkoto mqsto tolkova mnogo e sbutano.
+14. Smeni se simvola na t1 s pravilniq.
+15. Razchisti se kolkoto e po vyzmonostite mi i vremeto za tova.
+
+---
+
+Hardware revision F
+
+Overview:
+
+- unreleased, general improvements
+
+Notable changes:
+
+1. Added ESDS314DBVR(SOT-23-5) v sch i pcbnew. Slojen e v B.Cu;
+2. Dobaveni sa 2 x NA(GG0402052R542P) v sch i pcbnew. Dobaveni sa v B.Cu;
+3. C22 e premeseten mejdu L4 i GND padovete na U4;
+4. R29 e premesten do C8;
+5. R30 e zavartqn an 90 gradуsa i e slohen pod C6;
+6. U7 e zavartqn na 90 gradуs;
+7. R26 e premesten ot B.Cu v F.Cu. za da se sloji TVS1. Namesten e pod L2;
+8. C6 e zavartqn na 90 gradusa;
+9. C11 premesten ot B.Cu v F.Cu i e slojen mejdu L2 i GND pads na U4;
+10. R10, R11, R12, R13 sa premesteni ot B.Cu v F.Cu i sa slojeni pod GND pads na U4 za da se namestqt TVS3 i TVS2;
+11. L2, U7, C6, R30 bqha premesteni s nqkolko mils na lqvo;
+12. C6 be premesten po blizo do U1 za da ima mqsto za TVS1;
+13. C13 e namesten pod C6 i U1 za da se namesti TVS1;
+14. C7 e izmesteno v lqvo s nqkolko mils za da se osvobodi mqsto za defirencialnite dvoiki TD+ i TD-;
+15. C16 e doblijen do U1;
+16. Net - (L3 - Pad1) be premahnat (Po preporaka ot Nikito) ot ednata strana na USB - UART1 za da moje da se osvobodi mqsto za routvane.
+
+---
+
+Hardware revision E
+
+Overview:
+
+- improved behavior after reset 
+
+Notable changes:
+
+1. Added C20(1uF/10V/20%/X5R/C0603) to the ESP_EN signal;
+2. R32 changed from 470k/R0402 to 10k/R0402;
+3. C27 decreased length of the pads (the footprint was changed locally) to avoid short circuits during manual soldering;
+4. D2 rotated and moved away from C29;
+5. C22 changed from 22uF/6.3V/20%/X5R/C0603 to 47uF/6.3V/20%/X5R/C0805;
+6. T1 changed from DTC114YKA(SOT-23) to LMUN2211LT1G(SOT-23);
+7. UEXT1 changed from B-V-10-LF(GBH254SMT-10) to P-B-V-10-LF;
+
+---
+
+Hardware revision D
+
+Overview:
+
+- introduced major low-power mode improvements - deep sleep mode now consumes under 100uA;
+- added battery measurement option;
+
+Notable changes:
+
+1. R29 changed from 4.99k/1%/R0402 to 220k/R0402;
+2. R30 changed from 1.1k/1%/R0402 to 49.9k/1%/R0402;
+3. L2 changed from 2.2uH/1.5A/DCR<0.1R/CD32 to 2.2uH/1.5A/DCR=72mR/20%/3.00x3.00x1.50mm/CD32(NR3015T2R2M);
+4. R32 changed from 1k/R0402 to 470k/R0402;
+5. U1(CH340T(SSOP20W))'s pin<20>, NOS#, disconnected from GND and left open;
+6. D6 and D7 (1N5819S4(SOD-123)) added;
+7. R18 and R19 changed from 220R/R0402 to 10k/R0402;
+8. R16(NA(10k/R0402)) added just in case;
+9. C26 changed from 1nF/50V/10%/X7R/C0603 to 1nF/50V/10%/X7R/C0402;
+10. To enable battery measurement, added: C19(1nF/50V/10%/X7R/C0402), R17, and R22 - both resistors (470k/R0402);
+11. R7(0R(board_mounted)) shorted and deleted;
+12. BAT_SENS_E1 jumper added (to enable battery sense);
+13. 3D models improved.
+
+---
+
+Hardware revision C1 notable changes:
+
+1. Added 3D view
+
+---
+
+Hardware revision C notable changes:
+
+1. Moved buttons RST1 and BUT1 0.5mm towards the ESP-WROOM-32 module.
+2. USB-UART1's shield was disconnected from Vneg, now it is floating. Added L3 ferrite bead, NA(FB0805/600R/2A), between USB-UART1's shield and GND, in case there is a need to connect the shield to the GND.
+3. U3 was changed from MCP73833(MSOP10) to BL4054B-42TPRN(SOT23-5). This required additional changes:
+- R22(2.2k/R0402) was renamed to R5(2.2k/R0402). So, R22 is now removed;
+- R16(1k/R0402) was removed;
+- R17(10k/R0402) was removed;
+- THERM1 pad was removed;
+- The LED COMPL1(LED/GREEN/0603) was removed;
+4. Added C12 -> 2.2uF/100V/20%/X7R/C1206(AVX_12061C225KAT2A_Comet) in parallel to C27 -
+15uF/100V/20%/RM2.5/6.3x11mm(Farnell:1281844).
+5. MICRO_SD1's housing was disconnected from Vneg and connected to GND.
+6. Added resistor divider - R4(47k/R0402)/R9(100k/R0402) between +5V and GND to GPI39 for External Power Sense purposes.
+7. R34 changed from 49.9R/1%/R0402 to NA(49.9R/1%/R0402) -> Default Class 0 (0.44 to 12.95 W) instead of Class 3 (6.49 to 12.95 W)!!!
+8. EN_CT1 and EN_CT2 changed from Open to Closed package by default!
+
+---
+
+Hardware revision B2 notable changes:
+
+1. R34 changed from 49.9R/1%/R0402 to NA(49.9R/1%/R0402). This changes PoE's Class 3 to Class 0(Default)
+2. EN_CT1 and EN_CT2 changed from position open to closed (soldered).
+3. One 2.2uF/100V/20%/X7R/C01206(C12) is manually soldered in parallel to C27(15uF/100V/20%/RM2.5/6.3x11mm(Farnell:1281844))
+
+---
+
+Hardware revision B1 - initial release
+
+---
