@@ -1,0 +1,121 @@
+# --- Archivos Temporales y de Backup de KiCad ---
+*.bak
+*.kicad_prl
+*.kicad_pcb-bak
+*.kicad_sch-bak
+*-backups/
+_autosave-*
+
+# --- Archivos de Bloqueo (Lock files) ---
+*.lck
+
+# --- Salidas de Fabricación (Generados) ---
+# Es mejor generarlos cada vez, no subirlos al repo
+/gerbers/
+/outputs/
+*.gbr
+*.drl
+*.pdf
+*.csv
+*.pos
+
+# --- Visualización 3D y Caché ---
+# Solo ignorar si no quieres compartir tus modelos 3D personalizados
+# Si usas los de la librería estándar, no hace falta subirlos.
+fp-info-cache
+/packages3d/
+
+# --- Archivos de Sistema ---
+.DS_Store
+Thumbs.db
+
+.history
+*.history
+
+# -------------------------------------------------------------------
+# ESP-IDF build artifacts
+# -------------------------------------------------------------------
+# Carpeta de salida de compilación
+/build/
+/build_dir/
+/CMakeCache.txt
+/CMakeFiles/
+/Makefile
+/compile_commands.json
+/make.extras
+/makefile
+/components/*/_build/
+/components/*/CMakeLists.txt.user
+
+# Proyecto con CMake (v4+)
+/build/
+
+# -------------------------------------------------------------------
+# Configuraciones
+# -------------------------------------------------------------------
+# Archivo de configuración de ESP-IDF
+sdkconfig
+sdkconfig.old
+
+# Archivos de particiones (generados)
+/partitions*.bin
+/partitions*.csv
+
+# -------------------------------------------------------------------
+# Artefactos de flasheo y logs
+# -------------------------------------------------------------------
+*.elf
+*.map
+*.bin
+*.hex
+*.log
+
+# -------------------------------------------------------------------
+# Entornos de desarrollo y editores
+# -------------------------------------------------------------------
+# Visual Studio Code
+.vscode/
+/.vscode/*
+
+# CLion, IntelliJ IDEA
+.idea/
+/*.iml
+
+# Eclipse
+.project
+.cproject
+.settings/
+
+# -------------------------------------------------------------------
+# Caché de Python
+# -------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# -------------------------------------------------------------------
+# Otros
+# -------------------------------------------------------------------
+# Archivos temporales de sistema
+.DS_Store
+Thumbs.db
+
+# Logs diversos
+*.log
+
+# Archivos swap de editores
+*~
+*.swp
+
+dist
+
+# Frontend
+front/.vscode
+front/node_modules
+front/dist
+front/package-lock.json
+
+AGENTS.md
+
+.managed_components
+/managed_components/
