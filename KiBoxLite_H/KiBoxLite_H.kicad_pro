@@ -39,9 +39,9 @@
         "other_text_thickness": 0.15,
         "other_text_upright": false,
         "pads": {
-          "drill": 0.0,
-          "height": 0.9,
-          "width": 0.9
+          "drill": 0.6,
+          "height": 2.1,
+          "width": 1.0
         },
         "silk_line_width": 0.12,
         "silk_text_italic": false,
@@ -60,7 +60,24 @@
           "width": 0.0
         }
       ],
-      "drc_exclusions": [],
+      "drc_exclusions": [
+        [
+          "annular_width|91820000|154970000|953d5225-dcf1-4ba6-84e7-ad75992f49f8|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "annular_width|91820000|163610000|b15e121d-e202-494d-94fd-e5afeea4bdaf|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "annular_width|96000000|154970000|06686879-ea89-4734-91ff-5e5e5e172fcd|00000000-0000-0000-0000-000000000000",
+          ""
+        ],
+        [
+          "annular_width|96000000|163610000|c953f5eb-4241-403b-9e4d-cb54146ab185|00000000-0000-0000-0000-000000000000",
+          ""
+        ]
+      ],
       "meta": {
         "filename": "board_design_settings.json",
         "version": 2
@@ -142,13 +159,13 @@
         "min_hole_to_hole": 0.254,
         "min_microvia_diameter": 0.2,
         "min_microvia_drill": 0.1,
-        "min_resolved_spokes": 2,
+        "min_resolved_spokes": 1,
         "min_silk_clearance": 0.0,
         "min_text_height": 0.8,
         "min_text_thickness": 0.15,
         "min_through_hole_diameter": 0.2,
-        "min_track_width": 0.1016,
-        "min_via_annular_width": 0.1016,
+        "min_track_width": 0.1,
+        "min_via_annular_width": 0.1,
         "min_via_diameter": 0.5,
         "solder_mask_to_copper_clearance": 0.0,
         "use_height_for_length_calcs": true
