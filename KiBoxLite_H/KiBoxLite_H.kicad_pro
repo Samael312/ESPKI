@@ -39,9 +39,9 @@
         "other_text_thickness": 0.15,
         "other_text_upright": false,
         "pads": {
-          "drill": 0.9,
-          "height": 1.4,
-          "width": 1.4
+          "drill": 0.6,
+          "height": 1.9,
+          "width": 1.1
         },
         "silk_line_width": 0.15,
         "silk_text_italic": false,
@@ -60,24 +60,7 @@
           "width": 0.0
         }
       ],
-      "drc_exclusions": [
-        [
-          "annular_width|91720000|154970000|953d5225-dcf1-4ba6-84e7-ad75992f49f8|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "annular_width|91720000|163610000|b15e121d-e202-494d-94fd-e5afeea4bdaf|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "annular_width|95900000|154970000|06686879-ea89-4734-91ff-5e5e5e172fcd|00000000-0000-0000-0000-000000000000",
-          ""
-        ],
-        [
-          "annular_width|95900000|163610000|c953f5eb-4241-403b-9e4d-cb54146ab185|00000000-0000-0000-0000-000000000000",
-          ""
-        ]
-      ],
+      "drc_exclusions": [],
       "meta": {
         "filename": "board_design_settings.json",
         "version": 2
