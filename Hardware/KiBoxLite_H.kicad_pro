@@ -283,7 +283,23 @@
   "erc": {
     "erc_exclusions": [
       [
+        "multiple_net_names|4953000|1917700|57aa8d8f-23cd-44e9-8622-75bdbfe26d8e|5076a440-15db-4c7f-b5ef-bdc08cd8a551|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd",
+        ""
+      ],
+      [
+        "multiple_net_names|5473700|2476500|405d1a24-e87c-4c3e-83b6-002a975dfefd|8b120b01-14cc-4439-98ea-f410eea9b6c1|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd",
+        ""
+      ],
+      [
+        "multiple_net_names|5473700|2540000|40bd7e2c-073d-4746-befe-bac5da79c6a8|aab69605-3a17-4b19-87c1-c56990474536|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd",
+        ""
+      ],
+      [
         "multiple_net_names|685800|3454400|fc3606e0-6282-4df0-92e5-bf77603ebf6b|59bb8277-c164-4040-aeff-394d4816ee27|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd",
+        ""
+      ],
+      [
+        "multiple_net_names|863600|3251200|30758a6d-0499-4711-bffe-557968513042|bb029c25-4307-433a-9ffe-60a5aa06677e|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd|/b90747b7-8201-400d-ac9b-e7137fd496cd",
         ""
       ],
       [
@@ -1161,14 +1177,176 @@
           "label": "Datasheet",
           "name": "Datasheet",
           "show": true
+        },
+        {
+          "group_by": false,
+          "label": "Check_prices",
+          "name": "Check_prices",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Fieldname 1",
+          "name": "Fieldname 1",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Fieldname2",
+          "name": "Fieldname2",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Fieldname3",
+          "name": "Fieldname3",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MANUFACTURER",
+          "name": "MANUFACTURER",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MAXIMUM_PACKAGE_HEIGHT",
+          "name": "MAXIMUM_PACKAGE_HEIGHT",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MF",
+          "name": "MF",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "MP",
+          "name": "MP",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Manufacturer",
+          "name": "Manufacturer",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Note",
+          "name": "Note",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "PARTREV",
+          "name": "PARTREV",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Package",
+          "name": "Package",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Price",
+          "name": "Price",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Purchase-URL",
+          "name": "Purchase-URL",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "STANDARD",
+          "name": "STANDARD",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Sim.Pins",
+          "name": "Sim.Pins",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "SnapEDA_Link",
+          "name": "SnapEDA_Link",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Value 16MB",
+          "name": "Value 16MB",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Value EA",
+          "name": "Value EA",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Value EA-16MB",
+          "name": "Value EA-16MB",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Value EA-IND",
+          "name": "Value EA-IND",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Value IND",
+          "name": "Value IND",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Value WROVER",
+          "name": "Value WROVER",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Value WROVER-EA",
+          "name": "Value WROVER-EA",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Availability",
+          "name": "Availability",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "Descripción",
+          "name": "Description",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "#",
+          "name": "${ITEM_NUMBER}",
+          "show": false
         }
       ],
       "filter_string": "",
       "group_symbols": true,
       "include_excluded_from_bom": true,
-      "name": "Default Editing",
+      "name": "",
       "sort_asc": true,
-      "sort_field": "Referencia"
+      "sort_field": "Reference"
     },
     "bus_aliases": {},
     "connection_grid_size": 50.0,
@@ -1264,7 +1442,7 @@
         "uuid": "b90747b7-8201-400d-ac9b-e7137fd496cd"
       }
     ],
-    "used_designators": "",
+    "used_designators": "TP_485A1,TP_MDC1,MH4-6,TP_EN1,TP_PoE_OUT1,TP_ETH1-2,TP1-5,TP_3.3V1,TP_MDIO1,TP_485B1,TP_485TX1,TP_GND1,TP_GND_ETH1,TP_VBAT1,TP_VBUS1",
     "variants": []
   },
   "sheets": [
