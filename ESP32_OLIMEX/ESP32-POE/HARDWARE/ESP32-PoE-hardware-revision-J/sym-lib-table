@@ -1,3 +1,0 @@
-(sym_lib_table
- (lib (name ESP32-PoE_Rev_J)(type Legacy)(uri ${KIPRJMOD}/ESP32-PoE_Rev_J.lib)(options "")(descr ""))
-)

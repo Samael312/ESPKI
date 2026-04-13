@@ -1,0 +1,3 @@
+[submodule "KiCAD-libraries"]
+	path = KiCAD-libraries
+	url = https://github.com/kiconex/KiCAD-libraries.git

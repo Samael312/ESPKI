@@ -15,7 +15,6 @@ _autosave-*
 /outputs/
 *.gbr
 *.drl
-*.pdf
 *.csv
 *.pos
 
@@ -46,6 +45,9 @@ Thumbs.db
 /makefile
 /components/*/_build/
 /components/*/CMakeLists.txt.user
+
+# Archivos de proyecto específicos de ESP-IDF
+ESP32_OLIMEX/
 
 # Proyecto con CMake (v4+)
 /build/
