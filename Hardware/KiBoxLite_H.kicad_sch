@@ -18509,20 +18509,6 @@
 		)
 		(uuid "ca61de90-cf55-45c0-95b5-854eeeddb79e")
 	)
-	(text "Ethernet\n"
-		(exclude_from_sim no)
-		(at 546.862 235.966 0)
-		(effects
-			(font
-				(size 2.032 2.032)
-				(thickness 1)
-				(bold yes)
-				(italic yes)
-			)
-			(justify left bottom)
-		)
-		(uuid "cb21baf5-c08e-4640-a302-69dc1470b5f9")
-	)
 	(text "EMAC_MDC_out"
 		(exclude_from_sim no)
 		(at 281.305 320.675 0)
@@ -23881,6 +23867,16 @@
 	)
 	(wire
 		(pts
+			(xy 513.08 260.35) (xy 521.97 260.35)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "717f520e-7c20-4cef-a213-0f922f7da8de")
+	)
+	(wire
+		(pts
 			(xy 72.39 226.06) (xy 107.95 226.06)
 		)
 		(stroke
@@ -25369,16 +25365,6 @@
 		)
 		(uuid "9d531b28-601e-4382-ae18-3fe92f65d2a1")
 	)
-	(wire
-		(pts
-			(xy 547.37 246.38) (xy 556.26 246.38)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "9d90637c-df28-469a-a4cf-0f6424184265")
-	)
 	(polyline
 		(pts
 			(xy 458.47 143.51) (xy 458.47 214.63)
@@ -25388,16 +25374,6 @@
 			(type default)
 		)
 		(uuid "9dc77cf0-62f8-4f61-873f-f7d5a2662321")
-	)
-	(wire
-		(pts
-			(xy 547.37 240.03) (xy 556.26 240.03)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "9e0952b9-9a0d-468a-a255-5ef2cf965fae")
 	)
 	(wire
 		(pts
@@ -28351,6 +28327,16 @@
 	)
 	(wire
 		(pts
+			(xy 542.29 241.3) (xy 551.18 241.3)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fdf675b8-3dff-4cbf-932e-1582c05764fe")
+	)
+	(wire
+		(pts
 			(xy 101.6 203.2) (xy 101.6 218.44)
 		)
 		(stroke
@@ -29382,6 +29368,16 @@
 		)
 		(uuid "04bd7b7d-b369-49d7-9b9a-54cdf4c3277d")
 	)
+	(label "485_RX"
+		(at 304.8 251.46 270)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right bottom)
+		)
+		(uuid "06c77e2b-faff-43bd-b52c-e823559f4c54")
+	)
 	(label "GPI35"
 		(at 556.26 175.26 0)
 		(effects
@@ -29868,6 +29864,16 @@
 		)
 		(uuid "6591574a-3d73-447e-a48a-acd3e74cb351")
 	)
+	(label "485_PoE"
+		(at 335.28 243.84 180)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right bottom)
+		)
+		(uuid "68c0012d-6cdd-4d02-beaa-6db8a1685e7a")
+	)
 	(label "GPI34\\BUT1"
 		(at 554.99 177.8 0)
 		(effects
@@ -30090,16 +30096,6 @@
 		)
 		(uuid "81e73b43-e7eb-4fba-96d2-3947421f96b5")
 	)
-	(label "MDC"
-		(at 547.37 240.03 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "8b120b01-14cc-4439-98ea-f410eea9b6c1")
-	)
 	(label "GPIO21\\EMAC_TX_EN(RMII)"
 		(at 208.28 180.34 0)
 		(effects
@@ -30130,6 +30126,16 @@
 			(justify left bottom)
 		)
 		(uuid "9032e68d-93ad-4593-b3f9-c47ac1a19ff9")
+	)
+	(label "485_RX"
+		(at 513.08 260.35 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "92cbd06f-acf3-44c2-9dee-a5a2479ab22b")
 	)
 	(label "GPIO33"
 		(at 553.72 180.34 0)
@@ -30276,16 +30282,6 @@
 		)
 		(uuid "aa7a2170-18ed-4416-a641-76ad816573a8")
 	)
-	(label "MDIO"
-		(at 547.37 246.38 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "aab69605-3a17-4b19-87c1-c56990474536")
-	)
 	(label "GPI35"
 		(at 553.72 175.26 0)
 		(effects
@@ -30316,6 +30312,16 @@
 			(justify left bottom)
 		)
 		(uuid "af7ca230-bf8b-4e33-b73f-8c99c32c4bb0")
+	)
+	(label "485_PoE"
+		(at 542.29 241.3 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left bottom)
+		)
+		(uuid "b0310400-5fee-48b0-9f20-55904e4f7301")
 	)
 	(label "485_A"
 		(at 350.52 265.43 0)
@@ -51977,6 +51983,162 @@
 	)
 	(symbol
 		(lib_id "Connector:TestPoint")
+		(at 521.97 260.35 270)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "385003d7-3305-4c93-a472-c32852745ffa")
+		(property "Reference" "TP_485RX1"
+			(at 527.05 259.0799 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "TestPoint"
+			(at 527.05 261.6199 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "TestPoint:TestPoint_Pad_1.0x1.0mm"
+			(at 521.97 265.43 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 521.97 265.43 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "test point"
+			(at 521.97 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value IND" ""
+			(at 521.97 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value 16MB" ""
+			(at 521.97 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value EA" ""
+			(at 521.97 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value EA-IND" ""
+			(at 521.97 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value EA-16MB" ""
+			(at 521.97 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value WROVER" ""
+			(at 521.97 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value WROVER-EA" ""
+			(at 521.97 260.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "3a00e323-7856-4111-ba5e-bff9bacd85cb")
+		)
+		(instances
+			(project "KiBoxLite_H"
+				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
+					(reference "TP_485RX1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector:TestPoint")
 		(at 477.52 260.35 270)
 		(unit 1)
 		(body_style 1)
@@ -54183,162 +54345,6 @@
 		)
 	)
 	(symbol
-		(lib_id "Connector:TestPoint")
-		(at 556.26 246.38 270)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "77db0398-9f4f-49ce-9c4d-f7d8af37b828")
-		(property "Reference" "TP_MDIO1"
-			(at 561.34 245.1099 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "TestPoint"
-			(at 561.34 247.6499 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "TestPoint:TestPoint_Pad_1.0x1.0mm"
-			(at 556.26 251.46 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 556.26 251.46 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "test point"
-			(at 556.26 246.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value IND" ""
-			(at 556.26 246.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value 16MB" ""
-			(at 556.26 246.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value EA" ""
-			(at 556.26 246.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value EA-IND" ""
-			(at 556.26 246.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value EA-16MB" ""
-			(at 556.26 246.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value WROVER" ""
-			(at 556.26 246.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value WROVER-EA" ""
-			(at 556.26 246.38 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "e9196205-d68e-4332-a8f3-034c37d1b781")
-		)
-		(instances
-			(project "KiBoxLite_H"
-				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_MDIO1")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:R")
 		(at 312.42 251.46 90)
 		(unit 1)
@@ -55318,6 +55324,162 @@
 		)
 	)
 	(symbol
+		(lib_id "Connector:TestPoint")
+		(at 551.18 241.3 270)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "b334a46e-f33d-4fc5-a0d4-16518acd1427")
+		(property "Reference" "TP_485POE1"
+			(at 556.26 240.0299 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "TestPoint"
+			(at 556.26 242.5699 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "TestPoint:TestPoint_Pad_1.0x1.0mm"
+			(at 551.18 246.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 551.18 246.38 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "test point"
+			(at 551.18 241.3 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value IND" ""
+			(at 551.18 241.3 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value 16MB" ""
+			(at 551.18 241.3 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value EA" ""
+			(at 551.18 241.3 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value EA-IND" ""
+			(at 551.18 241.3 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value EA-16MB" ""
+			(at 551.18 241.3 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value WROVER" ""
+			(at 551.18 241.3 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value WROVER-EA" ""
+			(at 551.18 241.3 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "c1c3ac84-be38-4807-b9b5-0513d99deeb8")
+		)
+		(instances
+			(project "KiBoxLite_H"
+				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
+					(reference "TP_485POE1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "OLIMEX_Power:+5V")
 		(at 335.28 242.57 0)
 		(unit 1)
@@ -56034,162 +56196,6 @@
 			(project "ESP32-PoE2_Rev_B"
 				(path "/e56f1349-1efd-4426-bdd2-11c4df5950e8"
 					(reference "#PWR057")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Connector:TestPoint")
-		(at 556.26 240.03 270)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "d372eed2-5a0f-4453-8b87-70144446b120")
-		(property "Reference" "TP_MDC1"
-			(at 561.34 238.7599 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "TestPoint"
-			(at 561.34 241.2999 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "TestPoint:TestPoint_Pad_1.0x1.0mm"
-			(at 556.26 245.11 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 556.26 245.11 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "test point"
-			(at 556.26 240.03 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value IND" ""
-			(at 556.26 240.03 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value 16MB" ""
-			(at 556.26 240.03 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value EA" ""
-			(at 556.26 240.03 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value EA-IND" ""
-			(at 556.26 240.03 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value EA-16MB" ""
-			(at 556.26 240.03 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value WROVER" ""
-			(at 556.26 240.03 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value WROVER-EA" ""
-			(at 556.26 240.03 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "c1d75c05-653e-4132-a63e-490d8d64b8e6")
-		)
-		(instances
-			(project "KiBoxLite_H"
-				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_MDC1")
 					(unit 1)
 				)
 			)

@@ -39,9 +39,9 @@
         "other_text_thickness": 0.15,
         "other_text_upright": false,
         "pads": {
-          "drill": 0.6,
-          "height": 1.9,
-          "width": 1.1
+          "drill": 1.0,
+          "height": 1.778,
+          "width": 1.778
         },
         "silk_line_width": 0.15,
         "silk_text_italic": false,
@@ -1442,7 +1442,7 @@
         "uuid": "b90747b7-8201-400d-ac9b-e7137fd496cd"
       }
     ],
-    "used_designators": "TP_485A1,TP_MDC1,MH4-6,TP_EN1,TP_PoE_OUT1,TP_ETH1-2,TP1-5,TP_3.3V1,TP_MDIO1,TP_485B1,TP_485TX1,TP_GND1,TP_GND_ETH1,TP_VBAT1,TP_VBUS1",
+    "used_designators": "TP_485TX2,TP_485POE1,TP_485RX2",
     "variants": []
   },
   "sheets": [
