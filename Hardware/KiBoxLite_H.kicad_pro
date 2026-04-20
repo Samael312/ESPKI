@@ -39,9 +39,9 @@
         "other_text_thickness": 0.15,
         "other_text_upright": false,
         "pads": {
-          "drill": 1.0,
-          "height": 1.778,
-          "width": 1.778
+          "drill": 0.0,
+          "height": 0.55,
+          "width": 1.2
         },
         "silk_line_width": 0.15,
         "silk_text_italic": false,
@@ -1442,7 +1442,7 @@
         "uuid": "b90747b7-8201-400d-ac9b-e7137fd496cd"
       }
     ],
-    "used_designators": "TP_485TX2,TP_485POE1,TP_485RX2",
+    "used_designators": "",
     "variants": []
   },
   "sheets": [

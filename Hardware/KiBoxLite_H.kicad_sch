@@ -53661,7 +53661,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Fuse:Fuse_1206_3216Metric"
+		(property "Footprint" "kiboard_shield:TS250"
 			(at 394.97 267.97 0)
 			(hide yes)
 			(show_name no)
@@ -55587,7 +55587,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Fuse:Fuse_1206_3216Metric"
+		(property "Footprint" "kiboard_shield:TS250"
 			(at 398.78 243.84 0)
 			(hide yes)
 			(show_name no)
