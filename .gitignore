@@ -1,123 +1,28 @@
-# --- Archivos Temporales y de Backup de KiCad ---
-*.bak
-*.kicad_prl
-*.kicad_pcb-bak
-*.kicad_sch-bak
-*-backups/
-_autosave-*
-
-# --- Archivos de Bloqueo (Lock files) ---
-*.lck
-
-# --- Salidas de Fabricación (Generados) ---
-# Es mejor generarlos cada vez, no subirlos al repo
-/gerbers/
-/outputs/
-*.gbr
-*.drl
-*.csv
-*.pos
-
-# --- Visualización 3D y Caché ---
-# Solo ignorar si no quieres compartir tus modelos 3D personalizados
-# Si usas los de la librería estándar, no hace falta subirlos.
-fp-info-cache
-/packages3d/
-
-# --- Archivos de Sistema ---
-.DS_Store
-Thumbs.db
-
-.history
-*.history
-
 # -------------------------------------------------------------------
 # ESP-IDF build artifacts
 # -------------------------------------------------------------------
-# Carpeta de salida de compilación
-/Firmware/build/
-/Firmware/build_dir/
-/Firmware/CMakeCache.txt/Firmware
-/Firmware/CMakeFiles/
-/Firmware/Makefile
-/Firmware/compile_commands.json
-/Firmware/make.extras
-/Firmware/makefile
-/Firmware/components/*/_build/
-/Firmware/components/*/CMakeLists.txt.user
+# Carpeta de salida (la más importante)
+**/build/
+**/build_dir/
 
-# Archivos de proyecto específicos de ESP-IDF
-ESP32_OLIMEX/
-
-# Proyecto con CMake (v4+)
-/Firmware/build/
-
-# -------------------------------------------------------------------
-# Configuraciones
-# -------------------------------------------------------------------
-# Archivo de configuración de ESP-IDF
-sdkconfig
+# Archivos temporales de CMake y configuración
+**/CMakeCache.txt
+**/CMakeFiles/
+**/compile_commands.json
+**/cmake_install.cmake
+**/Makefile
+build/
 sdkconfig.old
+sdkconfig.temp
 
-# Archivos de particiones (generados)
+# Archivos generados por el sistema de particiones
 /partitions*.bin
-/partitions*.csv
 
-# -------------------------------------------------------------------
-# Artefactos de flasheo y logs
-# -------------------------------------------------------------------
+# Componentes gestionados (se descargan solos)
+managed_components/
+dependencies.lock
+
+# Artefactos de flasheo
 *.elf
 *.map
 *.bin
-*.hex
-*.log
-
-# -------------------------------------------------------------------
-# Entornos de desarrollo y editores
-# -------------------------------------------------------------------
-# Visual Studio Code
-.vscode/
-/.vscode/*
-
-# CLion, IntelliJ IDEA
-.idea/
-/*.iml
-
-# Eclipse
-.project
-.cproject
-.settings/
-
-# -------------------------------------------------------------------
-# Caché de Python
-# -------------------------------------------------------------------
-__pycache__/
-*.py[cod]
-*$py.class
-
-# -------------------------------------------------------------------
-# Otros
-# -------------------------------------------------------------------
-# Archivos temporales de sistema
-.DS_Store
-Thumbs.db
-
-# Logs diversos
-*.log
-
-# Archivos swap de editores
-*~
-*.swp
-
-dist
-
-# Frontend
-front/.vscode
-front/node_modules
-front/dist
-front/package-lock.json
-
-AGENTS.md
-
-.managed_components
-/managed_components/
