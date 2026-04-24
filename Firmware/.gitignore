@@ -35,22 +35,22 @@ Thumbs.db
 # ESP-IDF build artifacts
 # -------------------------------------------------------------------
 # Carpeta de salida de compilación
-/Firmware/build/
-/Firmware/build_dir/
-/Firmware/CMakeCache.txt/Firmware
-/Firmware/CMakeFiles/
-/Firmware/Makefile
-/Firmware/compile_commands.json
-/Firmware/make.extras
-/Firmware/makefile
-/Firmware/components/*/_build/
-/Firmware/components/*/CMakeLists.txt.user
+/build/
+/build_dir/
+/CMakeCache.txt
+/CMakeFiles/
+/Makefile
+/compile_commands.json
+/make.extras
+/makefile
+/components/*/_build/
+/components/*/CMakeLists.txt.user
 
 # Archivos de proyecto específicos de ESP-IDF
 ESP32_OLIMEX/
 
 # Proyecto con CMake (v4+)
-/Firmware/build/
+/build/
 
 # -------------------------------------------------------------------
 # Configuraciones
