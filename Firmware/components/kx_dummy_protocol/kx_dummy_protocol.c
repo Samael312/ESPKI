@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include <stdlib.h>
 
+
 static const char *TAG = "kx_dummy_proto";
 
 // ── Random con rango ──────────────────────────────────────────

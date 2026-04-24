@@ -3,12 +3,12 @@
 #include "kx_mqtt.h"
 #include "kx_config_handler.h"
 #include "kx_telemetry.h"
-#include "kx_dummy_protocol.h"
+#include "kx_modbus_master.h"    
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
-#include "esp_netif_sntp.h"    // ← correcto en IDF 5.x
+#include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -27,7 +27,7 @@ static void _ntp_init(void)
 {
     esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
     esp_netif_sntp_init(&config);
-    ESP_LOGI(TAG, "NTP sync started");
+    ESP_LOGI(TAG, "NTP sync iniciado");
 }
 
 // ── WiFi event handler ────────────────────────────────────────
@@ -43,7 +43,8 @@ static void _wifi_event_handler(void *arg, esp_event_base_t base,
             kx_system_set_net_state(KX_NET_DISCONNECTED);
             if (s_wifi_retry < KX_WIFI_MAX_RETRY) {
                 s_wifi_retry++;
-                ESP_LOGW(TAG, "WiFi retry %d/%d", s_wifi_retry, KX_WIFI_MAX_RETRY);
+                ESP_LOGW(TAG, "WiFi reintento %d/%d",
+                         s_wifi_retry, KX_WIFI_MAX_RETRY);
                 esp_wifi_connect();
             } else {
                 xEventGroupSetBits(s_wifi_events, WIFI_FAIL_BIT);
@@ -51,7 +52,7 @@ static void _wifi_event_handler(void *arg, esp_event_base_t base,
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)data;
-        ESP_LOGI(TAG, "got IP: " IPSTR, IP2STR(&ev->ip_info.ip));
+        ESP_LOGI(TAG, "IP obtenida: " IPSTR, IP2STR(&ev->ip_info.ip));
         s_wifi_retry = 0;
         kx_system_set_net_state(KX_NET_CONNECTED);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
@@ -85,7 +86,7 @@ static esp_err_t _wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "connecting to: %s", KX_WIFI_SSID);
+    ESP_LOGI(TAG, "conectando a: %s", KX_WIFI_SSID);
 
     EventBits_t bits = xEventGroupWaitBits(
         s_wifi_events,
@@ -96,11 +97,11 @@ static esp_err_t _wifi_init_sta(void)
 
     if (bits & WIFI_CONNECTED_BIT) return ESP_OK;
 
-    ESP_LOGE(TAG, "WiFi failed");
+    ESP_LOGE(TAG, "WiFi fallido");
     return ESP_FAIL;
 }
 
-// ── Router de mensajes MQTT entrantes ─────────────────────────
+// ── Router MQTT ───────────────────────────────────────────────
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
     uint32_t heap_before = kx_system_heap_free();
@@ -109,45 +110,81 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
              topic, len, heap_before);
     ESP_LOGD(TAG, "payload: %.*s", (int)len, payload);
 
-    if (strstr(topic, "/controls")) {
+    if (strstr(topic, "/controls") || strstr(topic, KX_DEVICE_UUID)) {
         kx_config_handle(topic, payload, len);
         return;
     }
 
-    if (strstr(topic, KX_DEVICE_UUID)) {
-        kx_config_handle(topic, payload, len);
-        return;
-    }
-
-    ESP_LOGW(TAG, "unhandled topic: %s", topic);
+    ESP_LOGW(TAG, "topic sin handler: %s", topic);
 }
+
+// ── Tarea de test Modbus (solo con KX_MODBUS_TEST_MODE) ───────
+#ifdef KX_MODBUS_TEST_MODE
+static void _modbus_test_task(void *arg)
+{
+    ESP_LOGI(TAG, "");
+    ESP_LOGI(TAG, "╔══════════════════════════════════════════╗");
+    ESP_LOGI(TAG, "║         MODO TEST MODBUS ACTIVO          ║");
+    ESP_LOGI(TAG, "╚══════════════════════════════════════════╝");
+
+    // Esperar a que UART esté listo
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+#ifdef KX_MODBUS_SCAN_ON_BOOT
+    // 1. Escanear el bus para descubrir esclavos
+    kx_modbus_scan(KX_MODBUS_SCAN_FROM, KX_MODBUS_SCAN_TO);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+#endif
+
+    // 2. Test de lectura repetido cada 5 s
+    int test_count = 0;
+    while (1) {
+        ESP_LOGI(TAG, "── Test #%d ─────────────────────────────", ++test_count);
+        kx_modbus_test_read(
+            KX_MODBUS_TEST_SLAVE,
+            KX_MODBUS_TEST_FC,
+            KX_MODBUS_TEST_REG,
+            KX_MODBUS_TEST_QTY
+        );
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+}
+#endif  // KX_MODBUS_TEST_MODE
 
 // ── app_main ──────────────────────────────────────────────────
 void app_main(void)
 {
-    // 1. sistema base: NVS, device_id, boot count
+    // 1. Sistema base: NVS, device_id, boot count
     ESP_ERROR_CHECK(kx_system_init());
 
     // 2. WiFi — bloqueante hasta IP o timeout
     if (_wifi_init_sta() != ESP_OK) {
-        ESP_LOGE(TAG, "no WiFi, rebooting in 10s");
+        ESP_LOGE(TAG, "sin WiFi, reiniciando en 10s");
         vTaskDelay(pdMS_TO_TICKS(10000));
         esp_restart();
     }
 
-    // 3. NTP — sincronizar hora real
+    // 3. NTP
     _ntp_init();
 
-    // 4. MQTT — publica device-status, suscribe topics
+    // 4. MQTT
     ESP_ERROR_CHECK(kx_mqtt_start(_on_mqtt_message));
 
-    // 5. Telemetría
+    // 5. Telemetría (tarea de supervisión de estado, log cada 10s)
     ESP_ERROR_CHECK(kx_telemetry_start());
 
-    // 6. Protocolo dummy — sustituir por kx_modbus_start() en Fase 2
-    ESP_ERROR_CHECK(kx_dummy_protocol_start());
+    // 6. Modbus RTU
+#ifdef KX_MODBUS_TEST_MODE
+    // — Modo test: solo inicializa UART y ejecuta lecturas manuales
+    ESP_ERROR_CHECK(kx_modbus_init());
+    xTaskCreate(_modbus_test_task, "mb_test", 4096, NULL,
+                KX_TASK_PRIO_TELEMETRY, NULL);
+#else
+    // — Modo producción: polling completo guiado por kx_param_store
+    ESP_ERROR_CHECK(kx_modbus_start());
+#endif
 
-    ESP_LOGI(TAG, "init done — device_id=%s fw=%s",
+    ESP_LOGI(TAG, "init completado — device_id=%s fw=%s",
              kx_system_device_id(), KX_FW_VERSION);
 
     while (1) {

@@ -6,10 +6,11 @@ idf_component_register(
         kx_mqtt
         kx_config
         kx_telemetry
-        kx_dummy_protocol
+        kx_modbus          
         nvs_flash
         esp_wifi
         esp_netif
         esp_event
-        lwip            
+        lwip
+    
 )

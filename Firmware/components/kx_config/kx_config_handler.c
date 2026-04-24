@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
+#include <esp_log.h>
 
 static const char *TAG = "kx_config";
 

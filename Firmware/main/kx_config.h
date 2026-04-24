@@ -2,8 +2,6 @@
 
 // =============================================================
 // kx_config.h  —  Kiconex Box Lite — Configuración por defecto
-// Todos los parámetros ajustables están aquí.
-// En Fase 2 se leerán de NVS; por ahora son constantes.
 // =============================================================
 
 // ── WiFi ─────────────────────────────────────────────────────
@@ -61,4 +59,32 @@
 #define KX_TOPIC_CONFIG_ERROR KX_TOPIC_PREFIX "/" KX_DEVICE_UUID "/config/error"
 
 // ── Firmware version ──────────────────────────────────────────
-#define KX_FW_VERSION  "0.1.0"
+#define KX_FW_VERSION  "0.2.0"
+
+// =============================================================
+// Modbus RTU — MAX13487E auto-direction
+//   RO  → GPIO36  (UART RX, input-only)
+//   DI  → GPIO4   (UART TX)
+// =============================================================
+#define KX_MODBUS_BAUD              9600
+#define KX_MODBUS_RESP_TIMEOUT_MS   1000
+#define KX_MODBUS_INTER_CHAR_MS     5
+#define KX_MODBUS_RETRY_COUNT       3
+#define KX_MODBUS_TX_FLUSH_DELAY_MS 3
+
+// ── Modo de arranque ─────────────────────────────────────────
+// KX_MODBUS_TEST_MODE: si está definido, ejecuta test en lugar
+// del polling normal. Descomentar para depurar hardware RS-485.
+//
+//#define KX_MODBUS_TEST_MODE
+
+// Parámetros del test manual (usados solo con KX_MODBUS_TEST_MODE)
+#define KX_MODBUS_TEST_SLAVE    0x01   // dirección del esclavo
+#define KX_MODBUS_TEST_FC       0x03   // función: 03 = Read Holding Regs
+#define KX_MODBUS_TEST_REG      0x0000 // primer registro a leer
+#define KX_MODBUS_TEST_QTY      10     // número de registros
+
+// Scan de bus (descomentar para activar al inicio)
+//#define KX_MODBUS_SCAN_ON_BOOT
+#define KX_MODBUS_SCAN_FROM     0x01
+#define KX_MODBUS_SCAN_TO       0x10

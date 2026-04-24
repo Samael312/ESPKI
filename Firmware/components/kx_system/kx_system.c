@@ -1,5 +1,4 @@
 #include "kx_system.h"
-#include "esp_log.h"
 #include "esp_system.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
@@ -9,6 +8,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include <string.h>
+#include <esp_log.h>
 #include <stdio.h>
 
 static const char *TAG = "kx_system";
