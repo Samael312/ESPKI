@@ -39,9 +39,9 @@
         "other_text_thickness": 0.15,
         "other_text_upright": false,
         "pads": {
-          "drill": 0.0,
-          "height": 0.55,
-          "width": 1.2
+          "drill": 1.0,
+          "height": 1.778,
+          "width": 1.778
         },
         "silk_line_width": 0.15,
         "silk_text_italic": false,
@@ -60,7 +60,12 @@
           "width": 0.0
         }
       ],
-      "drc_exclusions": [],
+      "drc_exclusions": [
+        [
+          "net_conflict|102565000|156075000|90ceef85-c228-4bbd-980c-f83aa01fa1bc|00000000-0000-0000-0000-000000000000",
+          ""
+        ]
+      ],
       "meta": {
         "filename": "board_design_settings.json",
         "version": 2
@@ -1442,7 +1447,7 @@
         "uuid": "b90747b7-8201-400d-ac9b-e7137fd496cd"
       }
     ],
-    "used_designators": "",
+    "used_designators": "R57-58,J3,#PWR31,#PWR46",
     "variants": []
   },
   "sheets": [
