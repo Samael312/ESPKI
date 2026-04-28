@@ -5,7 +5,7 @@
 // =============================================================
 
 // ── WiFi ─────────────────────────────────────────────────────
-#define KX_WIFI_SSID            "kiconex_pruebas_ansible"
+#define KX_WIFI_SSID            "pruebas_ansible"
 //#define KX_WIFI_SSID          "WIFI-PISO"
 #define KX_WIFI_PASSWORD        "KiconexWiFi"
 //#define KX_WIFI_PASSWORD      "1234567890"
@@ -76,10 +76,10 @@
 // KX_MODBUS_TEST_MODE: si está definido, ejecuta test en lugar
 // del polling normal. Descomentar para depurar hardware RS-485.
 //
-//#define KX_MODBUS_TEST_MODE
+#define KX_MODBUS_TEST_MODE
 
 // Parámetros del test manual (usados solo con KX_MODBUS_TEST_MODE)
-#define KX_MODBUS_TEST_SLAVE    0x01   // dirección del esclavo
+#define KX_MODBUS_TEST_SLAVE    0x02   // dirección del esclavo
 #define KX_MODBUS_TEST_FC       0x03   // función: 03 = Read Holding Regs
 #define KX_MODBUS_TEST_REG      0x0000 // primer registro a leer
 #define KX_MODBUS_TEST_QTY      10     // número de registros

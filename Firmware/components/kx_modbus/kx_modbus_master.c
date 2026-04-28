@@ -572,6 +572,21 @@ esp_err_t kx_modbus_start(void)
         return err;
     }
 
+    // ═════════════════════════════════════════════════════════
+    // INICIO DEL TEST DE HARDWARE (Emerson XC660D)
+    // ═════════════════════════════════════════════════════════
+    ESP_LOGW(TAG, "⚠️ ATENCION: Ejecutando test de hardware Modbus...");
+    
+    // 1. Escanea las direcciones de la 1 a la 5 (para ir rápido y confirmar el ID 2)
+    kx_modbus_scan(1, 5);
+    
+    // 2. Test de lectura directa al esclavo ID 2.
+    // Usamos FC3 (Read Holding Registers), leemos la dirección 0x0000, 1 registro.
+    kx_modbus_test_read(2, MB_FC_READ_HOLDING_REGS, 0x0000, 1);
+    
+    ESP_LOGW(TAG, "⚠️ Fin del test de hardware. Arrancando tarea normal...");
+    // ═════════════════════════════════════════════════════════
+
     BaseType_t ret = xTaskCreate(
         _modbus_task,
         "kx_modbus",
