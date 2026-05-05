@@ -122,10 +122,8 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 #ifdef KX_MODBUS_TEST_MODE
 static void _modbus_test_task(void *arg)
 {
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "╔══════════════════════════════════════════╗");
     ESP_LOGI(TAG, "║         MODO TEST MODBUS ACTIVO          ║");
-    ESP_LOGI(TAG, "╚══════════════════════════════════════════╝");
+    
 
     // Esperar a que UART esté listo
     vTaskDelay(pdMS_TO_TICKS(2000));

@@ -66,7 +66,7 @@
 //   RO  → GPIO36  (UART RX, input-only)
 //   DI  → GPIO4   (UART TX)
 // =============================================================
-#define KX_MODBUS_BAUD              9600
+#define KX_MODBUS_BAUD              19200
 #define KX_MODBUS_RESP_TIMEOUT_MS   1000
 #define KX_MODBUS_INTER_CHAR_MS     5
 #define KX_MODBUS_RETRY_COUNT       3

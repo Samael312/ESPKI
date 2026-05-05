@@ -19188,15 +19188,6 @@
 		(uuid "0beec788-de4a-43ad-b05b-2db39d2d68ef")
 	)
 	(bus_entry
-		(at 572.77 185.42)
-		(size 2.54 -2.54)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "0c39fb56-7d69-4ab0-b32f-ff6020c5fd96")
-	)
-	(bus_entry
 		(at 463.55 184.15)
 		(size 2.54 2.54)
 		(stroke
@@ -19303,6 +19294,15 @@
 			(type default)
 		)
 		(uuid "4c32a1ee-dbc6-45cb-a735-5d256bbb1dac")
+	)
+	(bus_entry
+		(at 463.55 168.91)
+		(size 2.54 2.54)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "57b6e607-6280-4dc1-9f3c-dee539d3a712")
 	)
 	(bus_entry
 		(at 436.88 46.99)
@@ -20384,6 +20384,16 @@
 	)
 	(wire
 		(pts
+			(xy 466.09 171.45) (xy 500.38 171.45)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "17260f80-d4a3-4c9d-a15d-345c6ea6dfd1")
+	)
+	(wire
+		(pts
 			(xy 72.39 166.37) (xy 72.39 170.18)
 		)
 		(stroke
@@ -20491,16 +20501,6 @@
 			(type default)
 		)
 		(uuid "1990b68a-1557-48ef-9ab7-30f9148a2135")
-	)
-	(wire
-		(pts
-			(xy 546.1 185.42) (xy 572.77 185.42)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "19e6ae97-7bec-433b-81ba-455058a9e3d1")
 	)
 	(wire
 		(pts
@@ -20844,7 +20844,7 @@
 	)
 	(bus
 		(pts
-			(xy 575.31 182.88) (xy 575.31 185.42)
+			(xy 575.31 180.34) (xy 575.31 185.42)
 		)
 		(stroke
 			(width 0)
@@ -25922,16 +25922,6 @@
 		)
 		(uuid "c55e8b19-1082-45ee-ae5e-c02bcee83047")
 	)
-	(bus
-		(pts
-			(xy 575.31 180.34) (xy 575.31 182.88)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "c55ed49a-86fd-45be-968c-4fd62b7e20e6")
-	)
 	(wire
 		(pts
 			(xy 320.04 256.54) (xy 322.58 256.54)
@@ -26461,16 +26451,6 @@
 			(type default)
 		)
 		(uuid "d57eb31b-f745-41fe-bf36-ec2ae9c5ebee")
-	)
-	(wire
-		(pts
-			(xy 483.87 171.45) (xy 500.38 171.45)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "d5a5d2b5-ecb3-475a-96f7-022241b77fce")
 	)
 	(wire
 		(pts
@@ -30193,7 +30173,7 @@
 		(uuid "fec813c3-544a-4530-81ca-33f0135a8193")
 	)
 	(label "GPIO16\\I2C-SCL"
-		(at 553.72 185.42 0)
+		(at 480.06 171.45 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -38079,7 +38059,7 @@
 	)
 	(symbol
 		(lib_id "OLIMEX_Power:+5V")
-		(at 483.87 171.45 90)
+		(at 546.1 185.42 270)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -38090,7 +38070,7 @@
 		(fields_autoplaced yes)
 		(uuid "00000000-0000-0000-0000-00005834e388")
 		(property "Reference" "#PWR067"
-			(at 487.87 171.45 0)
+			(at 542.1 185.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -38101,7 +38081,7 @@
 			)
 		)
 		(property "Value" "+5V"
-			(at 480.87 170.45 90)
+			(at 549.91 185.42 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -38112,7 +38092,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 483.87 171.45 0)
+			(at 546.1 185.42 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -38122,7 +38102,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 483.87 171.45 0)
+			(at 546.1 185.42 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -38132,7 +38112,7 @@
 			)
 		)
 		(property "Description" ""
-			(at 483.87 171.45 0)
+			(at 546.1 185.42 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -48906,7 +48886,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "092435b7-9fb2-44ee-b312-392da26311fa")
-		(property "Reference" "TP_485A1"
+		(property "Reference" "485A1"
 			(at 527.05 240.0299 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -49044,7 +49024,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_485A1")
+					(reference "485A1")
 					(unit 1)
 				)
 			)
@@ -49300,7 +49280,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "1b6691cf-8748-4853-985f-5af03e0ee272")
-		(property "Reference" "TP_GND1"
+		(property "Reference" "GND1"
 			(at 482.6 265.4299 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -49438,7 +49418,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_GND1")
+					(reference "GND1")
 					(unit 1)
 				)
 			)
@@ -49705,7 +49685,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "21b4dafd-1548-47e1-b966-77575756ef1f")
-		(property "Reference" "TP_485TX1"
+		(property "Reference" "485TX1"
 			(at 527.05 252.7299 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -49843,7 +49823,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_485TX1")
+					(reference "485TX1")
 					(unit 1)
 				)
 			)
@@ -50099,7 +50079,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "2590fe09-2edb-47c3-871d-458122f4446e")
-		(property "Reference" "TP_3.3V1"
+		(property "Reference" "3.3V1"
 			(at 482.6 246.3799 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -50237,7 +50217,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_3.3V1")
+					(reference "3.3V1")
 					(unit 1)
 				)
 			)
@@ -50795,7 +50775,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "385003d7-3305-4c93-a472-c32852745ffa")
-		(property "Reference" "TP_485RX1"
+		(property "Reference" "485RX1"
 			(at 527.05 259.0799 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -50933,7 +50913,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_485RX1")
+					(reference "485RX1")
 					(unit 1)
 				)
 			)
@@ -51026,7 +51006,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "484a85b9-277f-41c1-bcca-72f6f72097ae")
-		(property "Reference" "TP_VBAT1"
+		(property "Reference" "VBAT1"
 			(at 482.6 259.0799 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -51164,7 +51144,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_VBAT1")
+					(reference "VBAT1")
 					(unit 1)
 				)
 			)
@@ -51521,7 +51501,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "5b484e35-c909-4ee3-a3b4-b3e233aaf54b")
-		(property "Reference" "TP_VBUS1"
+		(property "Reference" "VBUS1"
 			(at 482.6 240.0299 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -51659,7 +51639,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_VBUS1")
+					(reference "VBUS1")
 					(unit 1)
 				)
 			)
@@ -52917,7 +52897,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "756fa712-5619-4962-b92e-0964243aa85c")
-		(property "Reference" "TP_485B1"
+		(property "Reference" "485B1"
 			(at 527.05 246.3799 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -53055,7 +53035,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_485B1")
+					(reference "485B1")
 					(unit 1)
 				)
 			)
@@ -53466,7 +53446,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "80df80cc-fd8d-445f-a858-74d0d275e0ca")
-		(property "Reference" "TP_EN1"
+		(property "Reference" "EN1"
 			(at 523.24 274.3199 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -53604,7 +53584,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_EN1")
+					(reference "EN1")
 					(unit 1)
 				)
 			)
@@ -54402,7 +54382,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "b334a46e-f33d-4fc5-a0d4-16518acd1427")
-		(property "Reference" "TP_485POE1"
+		(property "Reference" "485POE1"
 			(at 556.26 240.0299 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -54540,7 +54520,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_485POE1")
+					(reference "485POE1")
 					(unit 1)
 				)
 			)
@@ -55664,7 +55644,7 @@
 		(dnp no)
 		(fields_autoplaced yes)
 		(uuid "e6ec1057-1c0f-4e6d-a110-517cfbb9ba0e")
-		(property "Reference" "TP_PoE_OUT1"
+		(property "Reference" "PoE1"
 			(at 482.6 252.7299 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -55802,7 +55782,7 @@
 		(instances
 			(project "KiBoxLite_H"
 				(path "/b90747b7-8201-400d-ac9b-e7137fd496cd"
-					(reference "TP_PoE_OUT1")
+					(reference "PoE1")
 					(unit 1)
 				)
 			)

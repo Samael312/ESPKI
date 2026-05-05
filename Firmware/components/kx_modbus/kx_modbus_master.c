@@ -79,21 +79,37 @@ static int _read_response(uint8_t *buf, size_t max_len)
 {
     int total = 0;
 
-    // esperar primer byte con timeout largo
+    ESP_LOGI(TAG, "  [RX] esperando primer byte (timeout=%dms)...",
+             KX_MODBUS_RESP_TIMEOUT_MS);
+
     int n = uart_read_bytes(KX_MODBUS_UART_NUM, buf, 1,
                             pdMS_TO_TICKS(KX_MODBUS_RESP_TIMEOUT_MS));
-    if (n <= 0) return 0;
-    total = 1;
+    if (n <= 0) {
+        ESP_LOGW(TAG, "  [RX] timeout — ningún byte recibido");
+        return 0;
+    }
 
-    // leer el resto con timeout inter-carácter (detecta fin de trama)
+    total = 1;
+    ESP_LOGI(TAG, "  [RX] primer byte=0x%02X — leyendo resto...", buf[0]);
+
     while (total < (int)max_len) {
         n = uart_read_bytes(KX_MODBUS_UART_NUM,
                             buf + total,
                             max_len - total,
                             pdMS_TO_TICKS(KX_MODBUS_INTER_CHAR_MS));
-        if (n <= 0) break;   // silencio → trama completa
+        if (n <= 0) break;
         total += n;
+        ESP_LOGD(TAG, "  [RX] +%d bytes → total=%d", n, total);
     }
+
+    // Volcado hex completo de la respuesta
+    char hex[256] = "";
+    int hpos = 0;
+    for (int i = 0; i < total && hpos < (int)sizeof(hex) - 4; i++) {
+        hpos += snprintf(hex + hpos, sizeof(hex) - hpos, "%02X ", buf[i]);
+    }
+    ESP_LOGI(TAG, "  [RX] %d bytes: %s", total, hex);
+
     return total;
 }
 
@@ -108,60 +124,62 @@ static esp_err_t _parse_response(const uint8_t *buf, int len,
     memset(resp, 0, sizeof(*resp));
     resp->function = expected_fc;
 
+    ESP_LOGI(TAG, "  [PARSE] len=%d slave_esperado=0x%02X fc_esperado=0x%02X",
+             len, slave_addr, expected_fc);
+
     if (len < 4) {
-        ESP_LOGW(TAG, "respuesta demasiado corta: %d bytes", len);
+        ESP_LOGW(TAG, "  [PARSE] demasiado corta: %d bytes (mínimo 4)", len);
         return ESP_FAIL;
     }
 
-    // verificar CRC
     uint16_t crc_calc = _crc16(buf, len - 2);
     uint16_t crc_recv = (uint16_t)buf[len - 2] |
                         ((uint16_t)buf[len - 1] << 8);
-    if (crc_calc != crc_recv) {
-        ESP_LOGW(TAG, "CRC error calc=0x%04X recv=0x%04X", crc_calc, crc_recv);
-        return ESP_FAIL;
-    }
+    ESP_LOGI(TAG, "  [PARSE] CRC calc=0x%04X recv=0x%04X → %s",
+             crc_calc, crc_recv,
+             crc_calc == crc_recv ? "OK" : "ERROR");
 
-    // verificar dirección esclavo
-    if (buf[0] != slave_addr) {
-        ESP_LOGW(TAG, "dirección inesperada: esperado=0x%02X recibido=0x%02X",
-                 slave_addr, buf[0]);
-        return ESP_FAIL;
-    }
+    if (crc_calc != crc_recv) return ESP_FAIL;
+
+    ESP_LOGI(TAG, "  [PARSE] addr recibida=0x%02X esperada=0x%02X → %s",
+             buf[0], slave_addr,
+             buf[0] == slave_addr ? "OK" : "ERROR");
+
+    if (buf[0] != slave_addr) return ESP_FAIL;
 
     resp->function = buf[1];
+    ESP_LOGI(TAG, "  [PARSE] fc recibido=0x%02X%s",
+             buf[1],
+             (buf[1] & 0x80) ? " → EXCEPCIÓN MODBUS" : "");
 
-    // excepción Modbus: bit 7 del FC puesto
     if (buf[1] & 0x80) {
         resp->exception_code = buf[2];
-        ESP_LOGW(TAG, "excepción Modbus FC=0x%02X código=%d (slave=0x%02X)",
-                 buf[1], buf[2], slave_addr);
+        ESP_LOGW(TAG, "  [PARSE] código excepción=%d", buf[2]);
         return ESP_FAIL;
     }
 
     if (buf[1] != expected_fc) {
-        ESP_LOGW(TAG, "FC inesperado: esperado=0x%02X recibido=0x%02X",
+        ESP_LOGW(TAG, "  [PARSE] FC inesperado: esperado=0x%02X recibido=0x%02X",
                  expected_fc, buf[1]);
         return ESP_FAIL;
     }
 
-    // FC01..FC04: byte_count + datos
     if (expected_fc >= 0x01 && expected_fc <= 0x04) {
         resp->data_len = buf[2];
+        ESP_LOGI(TAG, "  [PARSE] byte_count=%d", resp->data_len);
         uint8_t copy_len = resp->data_len < sizeof(resp->data)
                            ? resp->data_len : (uint8_t)sizeof(resp->data);
         memcpy(resp->data, &buf[3], copy_len);
         resp->data_len = copy_len;
-    }
-    // FC06, FC10: echo de dirección + valor
-    else {
-        resp->data_len = (uint8_t)(len - 4);  // sin addr, fc, crc×2
+    } else {
+        resp->data_len = (uint8_t)(len - 4);
         if (resp->data_len > sizeof(resp->data))
             resp->data_len = sizeof(resp->data);
         memcpy(resp->data, &buf[2], resp->data_len);
     }
 
     resp->ok = true;
+    ESP_LOGI(TAG, "  [PARSE] éxito — %d bytes de datos", resp->data_len);
     return ESP_OK;
 }
 
@@ -233,51 +251,56 @@ esp_err_t kx_modbus_transaction(const kx_mb_request_t *req,
     int frame_len = _build_read_frame(req, frame, sizeof(frame));
     if (frame_len < 0) return ESP_ERR_INVALID_ARG;
 
-    for (int attempt = 1; attempt <= KX_MODBUS_RETRY_COUNT; attempt++) {
+    // Log de la trama TX
+    char tx_hex[64] = "";
+    int hpos = 0;
+    for (int i = 0; i < frame_len; i++) {
+        hpos += snprintf(tx_hex + hpos, sizeof(tx_hex) - hpos,
+                         "%02X ", frame[i]);
+    }
+    ESP_LOGI(TAG, "  [TX] trama: %s", tx_hex);
 
-        // limpiar RX antes de enviar
+    for (int attempt = 1; attempt <= KX_MODBUS_RETRY_COUNT; attempt++) {
+        ESP_LOGI(TAG, "  [TX] intento %d/%d — slave=0x%02X fc=0x%02X reg=0x%04X",
+                 attempt, KX_MODBUS_RETRY_COUNT,
+                 req->slave_addr, req->function, req->reg_addr);
+
         uart_flush_input(KX_MODBUS_UART_NUM);
 
         int written = uart_write_bytes(KX_MODBUS_UART_NUM,
                                        (const char *)frame, frame_len);
+        ESP_LOGI(TAG, "  [TX] uart_write_bytes → %d/%d bytes escritos",
+                 written, frame_len);
+
         if (written != frame_len) {
-            ESP_LOGW(TAG, "escritura parcial: %d/%d", written, frame_len);
+            ESP_LOGW(TAG, "  [TX] escritura parcial");
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
 
-        // esperar a que el shift register vacíe el último byte
-        uart_wait_tx_done(KX_MODBUS_UART_NUM, pdMS_TO_TICKS(50));
+        esp_err_t tx_done = uart_wait_tx_done(KX_MODBUS_UART_NUM,
+                                               pdMS_TO_TICKS(50));
+        ESP_LOGI(TAG, "  [TX] uart_wait_tx_done → %s",
+                 tx_done == ESP_OK ? "OK" : "TIMEOUT");
 
-        // margen adicional: tiempo de propagación RS485 + turnaround esclavo
         vTaskDelay(pdMS_TO_TICKS(KX_MODBUS_TX_FLUSH_DELAY_MS));
 
         uint8_t rx_buf[256];
         int rx_len = _read_response(rx_buf, sizeof(rx_buf));
 
         if (rx_len <= 0) {
-            ESP_LOGW(TAG, "timeout — slave=0x%02X fc=0x%02X reg=0x%04X "
-                     "intento=%d/%d",
-                     req->slave_addr, req->function, req->reg_addr,
+            ESP_LOGW(TAG, "  [RX] sin respuesta en intento %d/%d",
                      attempt, KX_MODBUS_RETRY_COUNT);
             continue;
         }
 
-        // log de bytes en modo DEBUG
-        if (esp_log_level_get(TAG) >= ESP_LOG_DEBUG) {
-            char hex[128] = "";
-            int hpos = 0;
-            for (int i = 0; i < rx_len && hpos < (int)sizeof(hex) - 4; i++) {
-                hpos += snprintf(hex + hpos, sizeof(hex) - hpos,
-                                 "%02X ", rx_buf[i]);
-            }
-            ESP_LOGD(TAG, "RX [%d bytes]: %s", rx_len, hex);
-        }
-
+        ESP_LOGI(TAG, "  [PARSE] intentando parsear %d bytes...", rx_len);
         if (_parse_response(rx_buf, rx_len,
                             req->slave_addr, req->function, resp) == ESP_OK) {
+            ESP_LOGI(TAG, "  [PARSE] OK");
             return ESP_OK;
         }
+        ESP_LOGW(TAG, "  [PARSE] fallo — ver motivo arriba");
 
         vTaskDelay(pdMS_TO_TICKS(20));
     }
