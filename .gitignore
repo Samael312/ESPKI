@@ -39,13 +39,7 @@ _autosave-*
 *.lck
 
 # --- Salidas de Fabricación (Generados) ---
-# Es mejor generarlos cada vez, no subirlos al repo
-/gerbers/
-/outputs/
-*.gbr
-*.drl
-*.csv
-*.pos
+
 
 # --- Visualización 3D y Caché ---
 # Solo ignorar si no quieres compartir tus modelos 3D personalizados
