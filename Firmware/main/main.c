@@ -179,7 +179,7 @@ void app_main(void)
                 KX_TASK_PRIO_TELEMETRY, NULL);
 #else
     // — Modo producción: polling completo guiado por kx_param_store
-    ESP_ERROR_CHECK(kx_modbus_start());
+    ESP_ERROR_CHECK(kx_modbus_init());
 #endif
 
     ESP_LOGI(TAG, "init completado — device_id=%s fw=%s",

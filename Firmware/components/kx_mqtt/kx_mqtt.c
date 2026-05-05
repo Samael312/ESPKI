@@ -41,7 +41,7 @@ typedef struct {
 } kx_msg_t;
 
 // ── Lista de controles detectados ─────────────────────────────
-#define KX_MAX_CONTROLS 64
+#define KX_MAX_CONTROLS 100
 
 static char s_control_names[KX_MAX_CONTROLS][64];
 static int  s_control_count  = 0;
