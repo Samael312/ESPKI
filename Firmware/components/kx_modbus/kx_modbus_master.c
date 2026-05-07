@@ -5,70 +5,64 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-static const char *TAG = "kx_modbus_master";
+static const char *TAG = "MB_FINAL_DEBUG";
 
-// Pines UEXT Olimex
 #define KX_MODBUS_UART_NUM   UART_NUM_2
-#define KX_MODBUS_PIN_TX     4   
-#define KX_MODBUS_PIN_RX     36  
-#define KX_MODBUS_PIN_DE     14  // Pin 9 UEXT (Jumper SCK)
-#define KX_MODBUS_PIN_RE     5   // Pin 10 UEXT (Jumper #SS)
+#define KX_MODBUS_PIN_TX     4   // Pin 9 UEXT
+#define KX_MODBUS_PIN_RX     13  // Pin 3 UEXT
+#define KX_MODBUS_PIN_DE     2   // Pin 6 UEXT (LED de la placa)
 
-void kx_modbus_test_read_pb1()
-{
-    // Trama para Emerson Adre=2, FC=03, Registro=256 (0x0100), Cantidad=1
-    // El CRC es 0x85E9
-    uint8_t req[] = { 0x02, 0x03, 0x01, 0x00, 0x00, 0x01, 0x85, 0xE9 };
+static void modbus_task(void *pvParameters) {
+    uint8_t req[] = { 0x01, 0x03, 0x01, 0x00, 0x00, 0x01, 0x85, 0xF6 };
     uint8_t rx_buf[128];
 
-    // Enviar (El driver maneja el pin DE automáticamente)
-    uart_write_bytes(KX_MODBUS_UART_NUM, req, sizeof(req));
-    
-    // Leer respuesta
-    int len = uart_read_bytes(KX_MODBUS_UART_NUM, rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(1000));
+    while (1) {
+        ESP_LOGI(TAG, "Enviando... (El LED debería encenderse)");
 
-    if (len >= 7) { // Respuesta mínima válida: Slave + FC + Bytes + 2 bytes Data + 2 bytes CRC
-        int16_t raw_val = (rx_buf[3] << 8) | rx_buf[4];
-        float temp = raw_val / 10.0;
-        ESP_LOGI(TAG, "Lectura PB1: %.1f C", temp);
-    } else {
-        ESP_LOGW(TAG, "Sin respuesta del Emerson (Check cableado A/B y Jumpers)");
+        // 1. MODO TRANSMISIÓN (GPIO 2 = HIGH)
+        gpio_set_level(KX_MODBUS_PIN_DE, 1); 
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        uart_write_bytes(KX_MODBUS_UART_NUM, (const char*)req, sizeof(req));
+        uart_wait_tx_done(KX_MODBUS_UART_NUM, pdMS_TO_TICKS(100));
+
+        // 2. MODO RECEPCIÓN (GPIO 2 = LOW)
+        gpio_set_level(KX_MODBUS_PIN_DE, 0); 
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // 3. LEER
+        int len = uart_read_bytes(KX_MODBUS_UART_NUM, rx_buf, sizeof(rx_buf), pdMS_TO_TICKS(500));
+
+        if (len > 0) {
+            ESP_LOGI(TAG, "¡RECIBIDO! ->");
+            ESP_LOG_BUFFER_HEX(TAG, rx_buf, len);
+        } else {
+            ESP_LOGW(TAG, "Nada por aquí... Revisa si el LED parpadeó.");
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
 }
 
-
-esp_err_t kx_modbus_init(void)
-{
-    // 1. Configurar la UART con Paridad PAR (Requerido por Emerson/Dixell)
+esp_err_t kx_modbus_init(void) {
     uart_config_t cfg = {
-        .baud_rate  = 9600,
-        .data_bits  = UART_DATA_8_BITS,
-        .parity     = UART_PARITY_EVEN,  // IMPORTANTE: Emerson usa Paridad Par
-        .stop_bits  = UART_STOP_BITS_1,
-        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+        .baud_rate = 9600,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
 
-    if (uart_is_driver_installed(KX_MODBUS_UART_NUM)) return ESP_OK;
-
-    ESP_ERROR_CHECK(uart_param_config(KX_MODBUS_UART_NUM, &cfg));
+    // Configurar GPIO 2 (LED) como salida
+    gpio_reset_pin(KX_MODBUS_PIN_DE);
+    gpio_set_direction(KX_MODBUS_PIN_DE, GPIO_MODE_OUTPUT);
     
-    // 2. Configurar pines. Nota: RX es el 36 (Input Only en ESP32)
-    ESP_ERROR_CHECK(uart_set_pin(KX_MODBUS_UART_NUM, KX_MODBUS_PIN_TX, KX_MODBUS_PIN_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-    
-    // 3. Instalar driver
-    ESP_ERROR_CHECK(uart_driver_install(KX_MODBUS_UART_NUM, 512, 0, 0, NULL, 0));
+    // Instalar UART
+    uart_driver_install(KX_MODBUS_UART_NUM, 512, 512, 0, NULL, 0);
+    uart_param_config(KX_MODBUS_UART_NUM, &cfg);
+    uart_set_pin(KX_MODBUS_UART_NUM, KX_MODBUS_PIN_TX, KX_MODBUS_PIN_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
-    // 4. MODO RS485 NATIVO: El ESP32 controlará el pin DE automáticamente
-    ESP_ERROR_CHECK(uart_set_mode(KX_MODBUS_UART_NUM, UART_MODE_RS485_HALF_DUPLEX));
-    
-    // Configuramos el pin DE para que la UART lo maneje
-    // En MOD-RS485, DE y RE suelen unirse o controlarse juntos para Half-Duplex
-    gpio_set_direction(KX_MODBUS_PIN_RE, GPIO_MODE_OUTPUT);
-    gpio_set_level(KX_MODBUS_PIN_RE, 0); // Dejar RE siempre bajo (escucha activa) si el hardware lo permite
-
-    ESP_LOGI(TAG, "Modbus iniciado (9600, 8E1) en UEXT");
-    kx_modbus_test_read_pb1(); // Test de lectura inicial
+    xTaskCreate(modbus_task, "mb_task", 4096, NULL, 5, NULL);
     return ESP_OK;
 }
-
