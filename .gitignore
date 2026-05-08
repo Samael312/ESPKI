@@ -26,6 +26,7 @@ dependencies.lock
 *.elf
 *.map
 *.bin
+*.zip
 
 # --- Archivos Temporales y de Backup de KiCad ---
 *.bak

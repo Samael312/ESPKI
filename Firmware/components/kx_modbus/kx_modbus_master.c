@@ -1,4 +1,4 @@
-#include "kx_modbus.h"
+#include "kx_modbus_master.h"
 #include "kx_param_store.h"
 #include "kx_telemetry.h"
 #include "kx_system.h"
