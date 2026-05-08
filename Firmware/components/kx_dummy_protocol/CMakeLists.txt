@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "kx_dummy_protocol.c"
+    SRCS
     INCLUDE_DIRS "."
     REQUIRES
         kx_system
