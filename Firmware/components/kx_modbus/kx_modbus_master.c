@@ -7,19 +7,17 @@
 
 static const char *TAG = "KX_MODBUS";
 
-// Pines UEXT
 #define UART_NUM    UART_NUM_2
-#define PIN_TX      4    // UEXT Pin 3
-#define PIN_RX      36   // UEXT Pin 4
-#define PIN_DE      14   // UEXT Pin 9  — DE
-#define PIN_RE      5    // UEXT Pin 10 — RE
+#define PIN_TX      4    // GPIO4 → DI
+#define PIN_RX      36   // GPIO36 → RO
+// RE/ a GND físicamente — receptor siempre habilitado
+// SHDN/ a +5V físicamente — chip siempre activo
 
-// XC660D
-#define XC660D_ADDR     0x02   
-#define REG_P1_TEMP     0x0100 
+#define XC660D_ADDR     0x02
+#define REG_P1_TEMP     0x0100
+
 static int cycle = 0;
 
-// ── CRC-16 Modbus ─────────────────────────────────────────────
 static uint16_t crc16(const uint8_t *data, uint16_t len)
 {
     uint16_t crc = 0xFFFF;
@@ -31,7 +29,6 @@ static uint16_t crc16(const uint8_t *data, uint16_t len)
     return crc;
 }
 
-// ────────────────────────────────────────────
 static void modbus_task(void *arg)
 {
     uint8_t req[8];
@@ -47,42 +44,28 @@ static void modbus_task(void *arg)
     req[6] = c & 0xFF;
     req[7] = (c >> 8) & 0xFF;
 
-    ESP_LOGI(TAG, "Leyendo temperatura P1 — XC660D addr=0x%02X reg=0x%04X",
+    ESP_LOGI(TAG, "Iniciando Modbus — addr=0x%02X reg=0x%04X",
              XC660D_ADDR, REG_P1_TEMP);
 
     while (1) {
-
         ESP_LOGI(TAG, "Ciclo %d", ++cycle);
 
-        gpio_set_level(PIN_RE, 0);
-        gpio_set_level(PIN_DE, 0);
-        
-        vTaskDelay(pdMS_TO_TICKS(10));
-
+        // Limpia buffer RX antes de transmitir
         uart_flush_input(UART_NUM);
-        vTaskDelay(pdMS_TO_TICKS(5));
-        
-        gpio_set_level(PIN_RE, 1);
-        gpio_set_level(PIN_DE, 1);
-        vTaskDelay(pdMS_TO_TICKS(2));
 
+        // Transmite — MAX13487 auto-direction, RE/ en GND
         uart_write_bytes(UART_NUM, (const char *)req, sizeof(req));
         uart_wait_tx_done(UART_NUM, pdMS_TO_TICKS(100));
-        ESP_LOGW(TAG, "Trama enviada: %02X %02X %02X %02X %02X %02X %02X %02X",
-                 req[0], req[1], req[2], req[3], req[4], req[5], req[6], req[7]);
-        
+
         uint8_t eco[8];
         int eco_len = uart_read_bytes(UART_NUM, eco, 8, pdMS_TO_TICKS(20));
-        ESP_LOGW(TAG, "Eco TX (%d bytes): %02X %02X %02X %02X %02X %02X %02X %02X",
-                eco_len, eco[0],eco[1],eco[2],eco[3],eco[4],eco[5],eco[6],eco[7]);
+        ESP_LOGW(TAG, "Eco (%d bytes):", eco_len);
+        if (eco_len > 0) ESP_LOG_BUFFER_HEX(TAG, eco, eco_len);
 
-        gpio_set_level(PIN_DE, 0);
-        gpio_set_level(PIN_RE, 0);
-
+        // Espera respuesta del esclavo
         int len = uart_read_bytes(UART_NUM, resp, sizeof(resp), pdMS_TO_TICKS(500));
 
         if (len >= 7) {
-        
             uint16_t crc_recv = resp[len-2] | (resp[len-1] << 8);
             uint16_t crc_calc = crc16(resp, len - 2);
 
@@ -91,34 +74,24 @@ static void modbus_task(void *arg)
                 goto next;
             }
 
-            
             int16_t raw = (int16_t)((resp[3] << 8) | resp[4]);
             float temp  = raw / 10.0f;
+            ESP_LOGI(TAG, "Temperatura P1 = %.1f °C (raw=%d)", temp, raw);
 
-            ESP_LOGI(TAG, "Temperatura P1 = %.1f °C  (raw=%d)", temp, raw);
-
-        } else if (len == 0) {
-            ESP_LOGW(TAG, "Sin respuesta — timeout");
+        } else if (len > 0) {
+            ESP_LOGW(TAG, "Respuesta incompleta (%d bytes):", len);
+            ESP_LOG_BUFFER_HEX(TAG, resp, len);
         } else {
-           
-            ESP_LOGE(TAG, "uart_read_bytes error: %d", len);
+            ESP_LOGW(TAG, "Sin respuesta — timeout");
         }
-        
+
 next:
-        vTaskDelay(pdMS_TO_TICKS(6000));
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
 }
 
-// ── Init ──────────────────────────────────────────────────────
 esp_err_t kx_modbus_init(void)
 {
-    gpio_reset_pin(PIN_DE);
-    gpio_reset_pin(PIN_RE);
-    gpio_set_direction(PIN_DE, GPIO_MODE_OUTPUT);
-    gpio_set_direction(PIN_RE, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_DE, 0);
-    gpio_set_level(PIN_RE, 0);
-
     uart_config_t cfg = {
         .baud_rate  = 9600,
         .data_bits  = UART_DATA_8_BITS,
@@ -130,7 +103,8 @@ esp_err_t kx_modbus_init(void)
     uart_driver_install(UART_NUM, 256, 256, 0, NULL, 0);
     uart_param_config(UART_NUM, &cfg);
     uart_set_pin(UART_NUM, PIN_TX, PIN_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    
+
+    ESP_LOGI(TAG, "UART2 TX=GPIO%d RX=GPIO%d baud=9600", PIN_TX, PIN_RX);
 
     xTaskCreate(modbus_task, "mb_task", 4096, NULL, 5, NULL);
     return ESP_OK;
