@@ -1,15 +1,15 @@
 #pragma once
 #include "esp_err.h"
 #include <stddef.h>
+#include <stdbool.h>
 
 // =============================================================
 // kx_config_handler.h  —  Recepción y parseo de configuración
-// En MVP: recibe, valida estructura básica, publica ack/error.
-// En Fase 2: aplicar y persistir en NVS.
 // =============================================================
 
 // Procesa un mensaje de configuración recibido por MQTT.
-// topic   = topic completo del mensaje
-// payload = cuerpo JSON (null-terminated)
-// len     = longitud del payload
 void kx_config_handle(const char *topic, const char *payload, size_t len);
+
+// Informa al handler que las entities ya están disponibles (cargadas
+// desde NVS), para que no vuelva a solicitarlas al recibir /controls.
+void kx_config_set_entities_ready(bool ready);

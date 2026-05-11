@@ -5,6 +5,7 @@ idf_component_register(
         esp_timer
         freertos
         heap
+        nvs_flash
     PRIV_REQUIRES
         json
 )

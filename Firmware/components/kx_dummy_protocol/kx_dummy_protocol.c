@@ -6,108 +6,78 @@
 #include "../../main/kx_config.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include <time.h>
+#include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdlib.h>
-#include <sys/time.h>
-
-// =============================================================
-// kx_dummy_protocol.c — Simulador de protocolo de campo
-//
-// Replica el comportamiento exacto de kx_modbus pero sin bus
-// físico: genera un valor uint16_t aleatorio dentro del rango raw
-// y aplica la misma transformación (offset/addition/mask) que el
-// driver real. Publica en los mismos topics.
-//
-// Para sustituir por el driver real:
-//   1. En app_main, reemplaza kx_dummy_protocol_start()
-//      por kx_modbus_start().
-//   2. Elimina este componente del CMakeLists.txt principal.
-// =============================================================
 
 static const char *TAG = "kx_dummy_proto";
 
-// ── Helpers ───────────────────────────────────────────────────
-
+// ── Random con rango ──────────────────────────────────────────
 static float _rand_float(float min, float max)
 {
     if (min >= max) return min;
     return min + ((float)rand() / (float)RAND_MAX) * (max - min);
 }
 
-// Misma lógica de transformación que kx_modbus._apply_transform:
-//   valor_final = (raw * scale) + addition
-// donde scale = offset si offset != 0, si no 1.
-// El valor_final se clampea al rango [minvalue, maxvalue].
-static float _apply_transform(const kx_param_t *p, uint16_t raw)
+// ── Timestamp real desde epoch ────────────────────────────────
+static double _ts(void)
 {
-    float value = (float)raw;
-
-    if (p->mask != 0) {
-        value = (float)((uint16_t)raw & (uint16_t)p->mask);
-    }
-
-    float scale = (p->offset != 0.0f) ? p->offset : 1.0f;
-    value = value * scale + p->addition;
-
-    if (p->minvalue < p->maxvalue) {
-        if (value < p->minvalue) value = p->minvalue;
-        if (value > p->maxvalue) value = p->maxvalue;
-    }
-
-    return value;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
-// Genera un raw simulado proporcional al rango [minvalue, maxvalue],
-// invirtiendo la transformación para que el valor final sea coherente.
+// ── Publica el valor de un parámetro (idéntico a kx_modbus_master) ──
 //
-// raw_target = (valor_deseado - addition) / scale
-// valor_deseado se sortea uniforme en [minvalue, maxvalue].
-static uint16_t _simulate_raw(const kx_param_t *p)
-{
-    float desired = _rand_float(p->minvalue, p->maxvalue);
-    float scale   = (p->offset != 0.0f) ? p->offset : 1.0f;
-    float raw_f   = (desired - p->addition) / scale;
-
-    if (raw_f < 0.0f)       raw_f = 0.0f;
-    if (raw_f > 65535.0f)   raw_f = 65535.0f;
-
-    return (uint16_t)raw_f;
-}
-
-// ── Callback por cada param ───────────────────────────────────
+// topic saliente: {uuid}/quiiot/entities/{param_id}/report   (si función lectura)
+//                 {uuid}/quiiot/entities/{param_id}/status   (si función lectura)
+//                 {uuid}/quiiot/entities/{param_id}/set      (si solo escritura)
+//
 static void _publish_param(int control_id,
                             const kx_param_t *param,
                             void *user_data)
 {
-    // Mismas condiciones de filtrado que el driver real
     if (param->function_read == 0 && param->function_write == 0) return;
     if (param->view == 0) return;
 
+    float value = _rand_float(param->minvalue, param->maxvalue);
+
+    if (param->offset != 0.0f && param->offset != 1.0f) {
+        value = value * param->offset;
+    }
+
+    char topic[128];
+    char payload[128];
+
+    snprintf(payload, sizeof(payload),
+             "{\"id\":%d,\"value\":%.3f,\"ts\":%.3f}",
+             param->param_id, value, _ts());
+
     if (param->function_read != 0) {
-        // Simular lectura: raw → transform → valor final
-        uint16_t raw   = _simulate_raw(param);
-        float    value = _apply_transform(param, raw);
+        // report
+        snprintf(topic, sizeof(topic),
+                 "%s/quiiot/entities/%d/report",
+                 KX_DEVICE_UUID, param->param_id);
+        kx_mqtt_publish(topic, payload, 0, 0);
 
-        ESP_LOGI(TAG,
-                 "ctrl=%d param=%d [%s] reg=%d raw=%u → %.3f",
-                 control_id, param->param_id, param->name,
-                 param->reg, raw, value);
+        // status
+        snprintf(topic, sizeof(topic),
+                 "%s/quiiot/entities/%d/status",
+                 KX_DEVICE_UUID, param->param_id);
+        kx_mqtt_publish(topic, payload, 0, 0);
 
-        // Publica en: {uuid}/controls/{control_id}/entities/{param_id}/status
-        kx_param_pub_status(control_id, param->param_id, value);
-
+        ESP_LOGD(TAG, "→ dummy ctrl=%d param=%d [%s] value=%.3f",
+                 control_id, param->param_id, param->name, value);
     } else {
-        // Solo escritura: publicar el valor actual como "set"
-        float value = _rand_float(param->minvalue, param->maxvalue);
+        snprintf(topic, sizeof(topic),
+                 "%s/quiiot/entities/%d/set",
+                 KX_DEVICE_UUID, param->param_id);
+        kx_mqtt_publish(topic, payload, 0, 0);
 
-        ESP_LOGI(TAG,
-                 "ctrl=%d param=%d [%s] reg=%d (write-only) → %.3f",
-                 control_id, param->param_id, param->name,
-                 param->reg, value);
-
-        // Publica en: {uuid}/controls/{control_id}/entities/{param_id}/set
-        kx_param_pub_set(control_id, param->param_id, value);
+        ESP_LOGD(TAG, "→ dummy set ctrl=%d param=%d [%s] value=%.3f",
+                 control_id, param->param_id, param->name, value);
     }
 }
 
@@ -117,13 +87,23 @@ static void _dummy_protocol_task(void *arg)
     srand((unsigned int)esp_timer_get_time());
     ESP_LOGI(TAG, "task started, interval=%ds", KX_TELEMETRY_INTERVAL_S);
 
+    // esperar a que todos los controls tengan entities
     ESP_LOGI(TAG, "waiting for all entities...");
     while (!kx_param_store_is_ready()) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
-    ESP_LOGI(TAG, "all entities ready: %d controls — waiting 2s",
+    // persistir en NVS para el próximo arranque
+    ESP_LOGI(TAG, "all entities ready (%d controls) — saving to NVS...",
              kx_param_store_count());
+    esp_err_t save_err = kx_param_store_save_nvs();
+    if (save_err == ESP_OK) {
+        ESP_LOGI(TAG, "entities cached in NVS OK");
+    } else {
+        ESP_LOGW(TAG, "NVS save failed: %s", esp_err_to_name(save_err));
+    }
+
+    // margen para que el backend procese antes de recibir telemetría
     vTaskDelay(pdMS_TO_TICKS(2000));
 
     while (1) {
@@ -133,20 +113,15 @@ static void _dummy_protocol_task(void *arg)
             continue;
         }
 
-        int total = kx_param_store_count();
-        ESP_LOGI(TAG, "publishing telemetry for %d controls heap=%" PRIu32,
-                 total, kx_system_heap_free());
-
+        ESP_LOGI(TAG, "publishing dummy telemetry (%d controls)",
+                 kx_param_store_count());
         kx_param_store_foreach(_publish_param, NULL);
-
-        ESP_LOGI(TAG, "telemetry done heap=%" PRIu32,
-                 kx_system_heap_free());
+        ESP_LOGI(TAG, "telemetry done heap=%" PRIu32, kx_system_heap_free());
 
         vTaskDelay(pdMS_TO_TICKS(KX_TELEMETRY_INTERVAL_S * 1000));
     }
 }
 
-// ── API pública ───────────────────────────────────────────────
 esp_err_t kx_dummy_protocol_start(void)
 {
     kx_param_store_init();
