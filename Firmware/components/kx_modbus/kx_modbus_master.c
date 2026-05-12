@@ -37,10 +37,10 @@ static const char *TAG = "kx_modbus";
 #endif
 
 // Tiempos
-#define MODBUS_RESPONSE_TIMEOUT_MS   500
+#define MODBUS_RESPONSE_TIMEOUT_MS   100
 #define MODBUS_INTER_FRAME_MS         20
 #define MODBUS_INTER_PARAM_MS         10
-#define MODBUS_RETRY_COUNT             3
+#define MODBUS_RETRY_COUNT             2
 
 // Funciones Modbus soportadas
 #define MB_FC_READ_COILS           0x01
@@ -228,6 +228,43 @@ static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
     return value;
 }
 
+// ── Contexto de iteración ─────────────────────────────────────
+typedef struct {
+    int total;      // total de params a leer en este ciclo
+    int done;       // params procesados (ok + error)
+    int ok;         // lecturas exitosas
+    int errors;     // errores Modbus
+    int last_pct;   // último porcentaje de barra impreso
+} _poll_ctx_t;
+
+// ── Barra de progreso ─────────────────────────────────────────
+#define POLL_BAR_WIDTH 30
+
+static void _print_progress(int control_id, int done, int total)
+{
+    if (total <= 0) return;
+
+    int pct   = (done * 100) / total;
+    int fill  = (done * POLL_BAR_WIDTH) / total;
+
+    char bar[POLL_BAR_WIDTH + 1];
+    for (int i = 0; i < POLL_BAR_WIDTH; i++) {
+        bar[i] = (i < fill) ? '#' : '-';
+    }
+    bar[POLL_BAR_WIDTH] = '\0';
+
+    // \r para sobreescribir la línea en terminales que lo soporten
+    printf("[poll] ctrl=%d [%s] %3d%% (%d/%d params)\r",
+           control_id, bar, pct, done, total);
+    fflush(stdout);
+
+    // salto de línea en los hitos para que quede en el log
+    if (pct == 25 || pct == 50 || pct == 75 || pct == 100) {
+        printf("\n");
+        fflush(stdout);
+    }
+}
+
 // ── Publicar valor en MQTT ────────────────────────────────────
 static void _publish_value(int control_id, const kx_param_t *param, float value)
 {
@@ -248,17 +285,11 @@ static void _publish_value(int control_id, const kx_param_t *param, float value)
                  "%s/quiiot/entities/%d/status",
                  KX_DEVICE_UUID, param->param_id);
         kx_mqtt_publish(topic, payload, 0, 0);
-
-        ESP_LOGI(TAG, "→ read  ctrl=%d param=%d reg=0x%04x [%s] value=%.3f",
-                 control_id, param->param_id, param->reg, param->name, value);
     } else {
         snprintf(topic, sizeof(topic),
                  "%s/quiiot/entities/%d/set",
                  KX_DEVICE_UUID, param->param_id);
         kx_mqtt_publish(topic, payload, 0, 0);
-
-        ESP_LOGI(TAG, "→ write ctrl=%d param=%d reg=0x%04x [%s] value=%.3f",
-                 control_id, param->param_id, param->reg, param->name, value);
     }
 }
 
@@ -279,8 +310,6 @@ static void _publish_error(int control_id, const kx_param_t *param,
              param->param_id, reason, param->reg, _ts());
 
     kx_mqtt_publish(topic, payload, 0, 0);
-    ESP_LOGI(TAG, "modbus error ctrl=%d param=%d reg=0x%04x: %s",
-             control_id, param->param_id, param->reg, reason);
 }
 
 // ── Callback de iteración: lee y publica cada param ──────────
@@ -288,6 +317,8 @@ static void _poll_param(int control_id,
                          const kx_param_t *param,
                          void *user_data)
 {
+    _poll_ctx_t *ctx = (_poll_ctx_t *)user_data;
+
     // ignorar params sin función alguna
     if (param->function_read == 0 && param->function_write == 0) return;
 
@@ -296,39 +327,51 @@ static void _poll_param(int control_id,
 
     // obtener slave_addr del store
     const kx_control_params_t *ctrl = kx_param_store_get(control_id);
-    if (!ctrl || ctrl->slave_addr == 0) {
-        ESP_LOGW(TAG, "no slave_addr for ctrl=%d, skipping", control_id);
-        return;
-    }
+    if (!ctrl || ctrl->slave_addr == 0) return;
     uint8_t slave_addr = (uint8_t)ctrl->slave_addr;
 
-    // Determinar FC de lectura
-    uint8_t fc_read  = (uint8_t)param->function_read;
-    uint8_t fc_write = (uint8_t)param->function_write;
-
+    // solo FCs de lectura
+    uint8_t fc_read = (uint8_t)param->function_read;
     bool is_read_fc = (fc_read == MB_FC_READ_COILS        ||
                        fc_read == MB_FC_READ_DISCRETE      ||
                        fc_read == MB_FC_READ_HOLDING_REGS  ||
                        fc_read == MB_FC_READ_INPUT_REGS);
 
-    if (!is_read_fc) {
-        ESP_LOGI(TAG, "skip write-only param=%d fc_w=%d reg=0x%04x",
-                 param->param_id, fc_write, param->reg);
-        return;
-    }
-
-    ESP_LOGI(TAG, "poll ctrl=%d slave=0x%02x fc=%d reg=0x%04x [%s]",
-             control_id, slave_addr, fc_read, (uint16_t)param->reg, param->name);
+    if (!is_read_fc) return;   // write-only: se gestiona por comando
 
     float value = _read_register(slave_addr, (uint16_t)param->reg, fc_read, param);
 
     if (value == -FLT_MAX) {
         _publish_error(control_id, param, "modbus_timeout");
+        if (ctx) ctx->errors++;
     } else {
         _publish_value(control_id, param, value);
+        if (ctx) ctx->ok++;
+    }
+
+    if (ctx) {
+        ctx->done++;
+        _print_progress(control_id, ctx->done, ctx->total);
     }
 
     vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_PARAM_MS));
+}
+
+// ── Contar params legibles de un control ──────────────────────
+// Necesitamos el total antes de iterar para la barra.
+typedef struct { int count; } _count_ctx_t;
+
+static void _count_readable(int control_id, const kx_param_t *param, void *user_data)
+{
+    _count_ctx_t *c = (_count_ctx_t *)user_data;
+    if (param->function_read == 0 && param->function_write == 0) return;
+    if (param->view == 0) return;
+    uint8_t fc = (uint8_t)param->function_read;
+    bool is_read_fc = (fc == MB_FC_READ_COILS       ||
+                       fc == MB_FC_READ_DISCRETE     ||
+                       fc == MB_FC_READ_HOLDING_REGS ||
+                       fc == MB_FC_READ_INPUT_REGS);
+    if (is_read_fc) c->count++;
 }
 
 // ── Tarea principal ───────────────────────────────────────────
@@ -343,7 +386,6 @@ static void _modbus_task(void *arg)
     ESP_LOGI(TAG, "entities ready (%d controls) — starting Modbus polling",
              kx_param_store_count());
 
-    // margen para que el backend procese el status inicial
     vTaskDelay(pdMS_TO_TICKS(4000));
 
     while (s_running) {
@@ -353,12 +395,28 @@ static void _modbus_task(void *arg)
             continue;
         }
 
-        ESP_LOGI(TAG, "modbus poll cycle: %d controls | heap=%" PRIu32,
-                 kx_param_store_count(), kx_system_heap_free());
+        // contar params legibles para la barra
+        _count_ctx_t cc = { .count = 0 };
+        kx_param_store_foreach(_count_readable, &cc);
 
-        kx_param_store_foreach(_poll_param, NULL);
+        _poll_ctx_t ctx = {
+            .total    = cc.count,
+            .done     = 0,
+            .ok       = 0,
+            .errors   = 0,
+            .last_pct = -1,
+        };
 
-        ESP_LOGI(TAG, "modbus cycle done | heap=%" PRIu32, kx_system_heap_free());
+        ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        ESP_LOGI(TAG, "poll cycle: %d controls | %d params | heap=%" PRIu32,
+                 kx_param_store_count(), ctx.total, kx_system_heap_free());
+
+        kx_param_store_foreach(_poll_param, &ctx);
+
+        // línea final de resumen
+        ESP_LOGI(TAG, "poll done: read=%d errors=%d | published to platform | heap=%" PRIu32,
+                 ctx.ok, ctx.errors, kx_system_heap_free());
+        ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
         vTaskDelay(pdMS_TO_TICKS(KX_TELEMETRY_INTERVAL_S * 1000));
     }
