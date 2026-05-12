@@ -88,6 +88,7 @@ static kx_control_params_t *_find_or_create(int control_id)
 
     s_store[s_count].control_id = control_id;
     s_store[s_count].count      = 0;
+    s_store[s_count].entities_ready = false;
     return &s_store[s_count++];
 }
 
@@ -368,7 +369,8 @@ esp_err_t kx_param_store_parse(const char *payload, size_t len,
     ESP_LOGI(TAG, "control %d: stored %d/%d params | heap=%lu",
              control_id, ctrl->count, total,
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
-
+    
+    ctrl->entities_ready = true;    
     return ESP_OK;
 }
 
@@ -395,7 +397,11 @@ void kx_param_store_set_expected(int count)
 
 bool kx_param_store_is_ready(void)
 {
-    return s_expected > 0 && s_count >= s_expected;
+    if (s_expected <= 0 || s_count < s_expected) return false;
+    for (int i = 0; i < s_count; i++) {
+        if (!s_store[i].entities_ready) return false;
+    }
+    return true;
 }
 
 void kx_param_store_foreach(kx_param_iter_cb_t cb, void *user_data)
