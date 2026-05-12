@@ -302,8 +302,12 @@ static void _poll_param(int control_id,
     // ignorar params ocultos
     if (param->view == 0) return;
 
-    // el esclavo Modbus usa control_id como slave address
-    uint8_t slave_addr = (uint8_t)control_id;
+    const kx_control_params_t *ctrl = kx_param_store_get(control_id);
+    if (!ctrl || ctrl->slave_addr == 0) {
+        ESP_LOGW(TAG, "no slave_addr for ctrl=%d, skipping", control_id);
+        return;
+    }
+    int slave_addr = ctrl->slave_addr;
 
     // Determinar función: preferir function_read, fallback a function_write
     uint8_t fc = (param->function_read != 0)

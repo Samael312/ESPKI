@@ -35,6 +35,7 @@ typedef struct {
 
 typedef struct {
     int         control_id;
+    int         slave_addr;
     kx_param_t  params[KX_PARAM_MAX_PER_CONTROL];
     int         count;
 } kx_control_params_t;
@@ -80,3 +81,6 @@ bool kx_param_store_is_ready(void);
 // ── Progreso visual ───────────────────────────────────────────
 // Registra el callback que se invocará durante el parseo
 void kx_param_store_set_progress_cb(kx_param_progress_cb_t cb);
+
+// ── Configuración adicional por control (ej. dirección Modbus) ───
+void kx_param_store_set_slave_addr(int control_id, int slave_addr);

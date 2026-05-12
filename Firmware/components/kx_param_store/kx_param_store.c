@@ -115,6 +115,21 @@ static void _get_str(cJSON *obj, const char *key, char *buf, size_t len)
     }
 }
 
+void kx_param_store_set_slave_addr(int control_id, int slave_addr)
+{
+    if (!s_store) return;
+    for (int i = 0; i < s_count; i++) {
+        if (s_store[i].control_id == control_id) {
+            s_store[i].slave_addr = slave_addr;
+            ESP_LOGI(TAG, "slave_addr set: ctrl=%d → %d", control_id, slave_addr);
+            return;
+        }
+    }
+    // si todavía no existe el control, crearlo
+    kx_control_params_t *ctrl = _find_or_create(control_id);
+    if (ctrl) ctrl->slave_addr = slave_addr;
+}
+
 // ── API pública — ciclo de vida ───────────────────────────────
 void kx_param_store_init(void)
 {

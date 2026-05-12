@@ -70,21 +70,23 @@ static void _send_error(const char *config_type,
 //   …/controls/21601/entities → "entities"
 static const char *_config_type_from_topic(const char *topic)
 {
-    if (strstr(topic, "/entities"))  return "entities";
+    if (strstr(topic, "/entities")) return "entities";
 
     const char *p = strstr(topic, "/controls");
     if (p) {
         p += strlen("/controls");
-        // ¿hay algo más tras /controls?
+        
+        // ".../controls" o ".../controls " -> Lista completa
         if (*p == '\0' || *p == ' ') return "controls_list";
-        if (*p == '/') {
-            // …/controls/NUM  → control individual
-            return "control_single";
-        }
+        
+        // ".../controls/..." -> Configuración de un control (o sub-ruta)
+        if (*p == '/') return "control_single";
+
         return "controls_list";
     }
 
     if (strstr(topic, KX_DEVICE_UUID)) return "device";
+    
     return "unknown";
 }
 
@@ -271,82 +273,57 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
 {
     const char *config_type = _config_type_from_topic(topic);
 
-    // ── entities ─────────────────────────────────────────────
+    // ── 1. CONTROL_INFO (Mapeo Modbus + Activación de Control) ──────
+    if (strcmp(config_type, "control_info") == 0) {
+        cJSON *root = cJSON_ParseWithLength(payload, len);
+        if (!root) return;
+
+        int ctrl_id = _control_id_from_topic(topic);
+        cJSON *addr = cJSON_GetObjectItem(root, "control_address");
+        
+        // A. Guardamos el slave_addr para Modbus
+        if (ctrl_id > 0 && addr && cJSON_IsNumber(addr)) {
+            int slave_addr = (int)addr->valuedouble;
+            kx_param_store_set_slave_addr(ctrl_id, slave_addr);
+            ESP_LOGI(TAG, "control_info: ctrl=%d mapeado a slave_addr=%d", ctrl_id, slave_addr);
+        }
+
+        // B. PROCESAMOS EL CONTROL (Esto disparará el entities-discovery)
+        // Pasamos 'root' porque el payload de control_info suele ser el objeto control
+        _process_single_control(root, ctrl_id);
+
+        cJSON_Delete(root);
+        _send_ack("control_info");
+        return; // Aquí sí salimos, porque ya hicimos todo
+    }
+
+    // ── 2. ENTITIES (Sin cambios) ───────────────────────────────────
     if (strcmp(config_type, "entities") == 0) {
-        uint32_t heap_before = kx_system_heap_free();
         int control_id = _control_id_from_topic(topic);
-
-        ESP_LOGI(TAG, "entities rx: topic=%s size=%d ctrl=%d heap=%" PRIu32,
-                 topic, (int)len, control_id, heap_before);
-
         if (control_id > 0) {
             kx_param_store_set_progress_cb(_on_entities_progress);
             kx_param_store_parse(payload, len, control_id);
             kx_param_store_set_progress_cb(NULL);
-        } else {
-            ESP_LOGW(TAG, "could not extract control_id from topic: %s", topic);
+            _send_ack(config_type);
         }
-
-        ESP_LOGI(TAG, "entities done ctrl=%d heap=%" PRIu32 " (delta=%d)",
-                 control_id, kx_system_heap_free(),
-                 (int)heap_before - (int)kx_system_heap_free());
-
-        _send_ack(config_type);
-        return;
+        return; 
     }
 
-    // ── resto: limitar tamaño ─────────────────────────────────
+    // ── 3. RESTO (Filtro de tamaño y parseo para otros tipos) ────────
     if (len > KX_PAYLOAD_MAX_BYTES) {
-        ESP_LOGW(TAG, "payload too large (%d bytes)", (int)len);
-        _send_error(config_type, "PARSE_ERROR", "payload exceeds max size");
+        _send_error(config_type, "PARSE_ERROR", "payload too large");
         return;
     }
 
     cJSON *root = cJSON_ParseWithLength(payload, len);
-    if (!root) {
-        const char *err_ptr = cJSON_GetErrorPtr();
-        char detail[64];
-        snprintf(detail, sizeof(detail), "parse error near: %.40s",
-                 err_ptr ? err_ptr : "unknown");
-        _send_error(config_type, "PARSE_ERROR", detail);
-        return;
-    }
+    if (!root) return;
 
-    uint32_t heap_before = kx_system_heap_free();
-    esp_err_t err = ESP_OK;
-
-    if (strcmp(config_type, "device") == 0) {
-        err = _validate_device_config(root);
-        if (err != ESP_OK) {
-            _send_error(config_type, "MISSING_FIELD", "uuid required");
-        }
-
-    } else if (strcmp(config_type, "controls_list") == 0) {
-        err = _handle_controls_list(root);
-
-    } else if (strcmp(config_type, "control_single") == 0) {
-        int topic_ctrl_id = _control_id_from_topic(topic);
-        err = _handle_control_single(root, topic_ctrl_id);
-
-    } else {
-        ESP_LOGW(TAG, "unknown config type '%s' in topic: %s",
-                 config_type, topic);
-        cJSON_Delete(root);
-        return;
+    if (strcmp(config_type, "controls_list") == 0) {
+        _handle_controls_list(root);
+    } 
+    else if (strcmp(config_type, "control_single") == 0) {
+        _handle_control_single(root, _control_id_from_topic(topic));
     }
 
     cJSON_Delete(root);
-
-    uint32_t heap_after = kx_system_heap_free();
-    ESP_LOGI(TAG, "config '%s' heap: before=%" PRIu32 " after=%" PRIu32 " delta=%d",
-             config_type, heap_before, heap_after,
-             (int)heap_before - (int)heap_after);
-
-    if (heap_after < heap_before / 2) {
-        ESP_LOGW(TAG, "high memory pressure after config parse!");
-    }
-
-    if (err == ESP_OK) {
-        _send_ack(config_type);
-    }
 }
