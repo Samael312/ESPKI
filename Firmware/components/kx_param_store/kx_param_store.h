@@ -38,6 +38,7 @@ typedef struct {
     int         slave_addr;
     kx_param_t  params[KX_PARAM_MAX_PER_CONTROL];
     int         count;
+    bool        entities_ready;
 } kx_control_params_t;
 
 // ── Callback de progreso de descarga ─────────────────────────
