@@ -6,7 +6,6 @@ idf_component_register(
         kx_mqtt
         kx_config
         kx_telemetry
-        kx_dummy_protocol
         kx_modbus
         kx_param_store
         nvs_flash

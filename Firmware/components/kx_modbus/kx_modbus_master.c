@@ -3,7 +3,7 @@
 #include "kx_mqtt.h"
 #include "kx_system.h"
 #include "../../main/kx_config.h"
-
+#include "kx_telemetry.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -68,20 +68,12 @@ static uint16_t _crc16(const uint8_t *buf, size_t len)
     return crc;
 }
 
-// ── Timestamp real ────────────────────────────────────────────
-static double _ts(void)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
-}
-
 // ── Init UART ─────────────────────────────────────────────────
 static esp_err_t _uart_init(void)
 {
     uart_config_t cfg = {
         .baud_rate           = KX_MODBUS_BAUD,
-        .data_bits           = UART_DATA_8_BITS,
+        .data_bits           = UART_DATA_8_BITS, 
         .parity              = UART_PARITY_DISABLE,
         .stop_bits           = UART_STOP_BITS_1,
         .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
@@ -268,48 +260,34 @@ static void _print_progress(int control_id, int done, int total)
 // ── Publicar valor en MQTT ────────────────────────────────────
 static void _publish_value(int control_id, const kx_param_t *param, float value)
 {
-    char topic[128];
-    char payload[128];
-
-    snprintf(payload, sizeof(payload),
-             "{\"id\":%d,\"value\":%.3f,\"ts\":%.3f}",
-             param->param_id, value, _ts());
-
     if (param->function_read != 0) {
-        snprintf(topic, sizeof(topic),
-                 "%s/quiiot/entities/%d/report",
-                 KX_DEVICE_UUID, param->param_id);
-        kx_mqtt_publish(topic, payload, 0, 0);
 
-        snprintf(topic, sizeof(topic),
-                 "%s/quiiot/entities/%d/status",
-                 KX_DEVICE_UUID, param->param_id);
-        kx_mqtt_publish(topic, payload, 0, 0);
+        if (param->sampling != 0) {
+        // 1. Enviamos el REPORT (Dato histórico/telemetría)
+        kx_param_pub_report(control_id, param->param_id, value);
+        ESP_LOGW(TAG, "report → ctrl=%d param=%d val=%.3f", control_id, param->param_id, value);
+        }
+
+        // 2. Enviamos el STATUS (Estado actual del canal)
+        kx_param_pub_status(control_id, param->param_id, value);
+        
+        
+        
+        ESP_LOGD(TAG, "-> read ok ctrl=%d param=%d val=%.3f", control_id, param->param_id, value);
     } else {
-        snprintf(topic, sizeof(topic),
-                 "%s/quiiot/entities/%d/set",
-                 KX_DEVICE_UUID, param->param_id);
-        kx_mqtt_publish(topic, payload, 0, 0);
+        // Caso de escritura (SET)
+        kx_param_pub_set(control_id, param->param_id, value);
     }
 }
 
 // ── Publicar error de lectura ─────────────────────────────────
-static void _publish_error(int control_id, const kx_param_t *param,
-                            const char *reason)
+static void _publish_error(int control_id, const kx_param_t *param, const char *reason)
 {
-    char topic[128];
-    char payload[256];
-
-    snprintf(topic, sizeof(topic),
-             "%s/quiiot/entities/%d/status",
-             KX_DEVICE_UUID, param->param_id);
-
-    snprintf(payload, sizeof(payload),
-             "{\"id\":%d,\"error\":true,\"error_message\":\"%s\","
-             "\"reg\":\"0x%04x\",\"ts\":%.3f}",
-             param->param_id, reason, param->reg, _ts());
-
-    kx_mqtt_publish(topic, payload, 0, 0);
+    // Solo enviamos STATUS informando del error (no se envía REPORT si hay error)
+    kx_param_pub_error_modbus(control_id, param->param_id, (uint16_t)param->reg, reason);
+    
+    ESP_LOGW(TAG, "modbus error ctrl=%d param=%d reg=0x%04x: %s",
+             control_id, param->param_id, param->reg, reason);
 }
 
 // ── Callback de iteración: lee y publica cada param ──────────

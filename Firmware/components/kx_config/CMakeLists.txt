@@ -5,6 +5,7 @@ idf_component_register(
         kx_system
         kx_mqtt
         kx_param_store
+        kx_modbus
         freertos
         esp_timer
     PRIV_REQUIRES

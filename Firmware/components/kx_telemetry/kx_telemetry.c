@@ -1,6 +1,7 @@
 #include "kx_telemetry.h"
 #include "kx_system.h"
 #include "kx_mqtt.h"
+#include <sys/time.h>
 #include "../../main/kx_config.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -8,8 +9,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <stdio.h>
+#include <inttypes.h>
 
 static const char *TAG = "kx_telemetry";
+
+// --- Funciones auxiliares ---
 
 static int8_t _get_rssi(void)
 {
@@ -20,19 +24,21 @@ static int8_t _get_rssi(void)
 
 static double _ts(void)
 {
-    return (double)esp_timer_get_time() / 1000000.0;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
-// topic: {uuid}/controls/{control_id}/status
+// --- Publicación de Controles (Infraestructura) ---
+
 void kx_control_pub_status(int control_id, const char *uuid,
                             const char *connection_status)
 {
     char topic[128];
     char payload[256];
 
-    snprintf(topic, sizeof(topic),
-             "%s/controls/%d/status",
-             KX_DEVICE_UUID, control_id);
+    // Mantiene la ruta de control
+    snprintf(topic, sizeof(topic), "%s/controls/%d/status", KX_DEVICE_UUID, control_id);
 
     snprintf(payload, sizeof(payload),
         "{"
@@ -43,27 +49,24 @@ void kx_control_pub_status(int control_id, const char *uuid,
         "\"link\": {\"detected\": \"%s\"},"
         "\"timestamp\": %.3f"
         "}",
-        control_id,
-        uuid,
-        connection_status,
-        connection_status,
-        _ts()
+        control_id, uuid, connection_status, connection_status, _ts()
     );
 
     kx_mqtt_publish(topic, payload, 1, 0);
 }
 
-// ── Publica el valor de un param ──────────────────────────────
+// --- Publicación de Entidades (Datos de Modbus) ---
 
+/**
+ * Publica el estado actual (STATUS).
+ * Topic: {uuid}/quiiot/entities/{id}/status
+ */
 void kx_param_pub_status(int control_id, int param_id, float value)
 {
     char topic[128];
     char payload[128];
 
-    snprintf(topic, sizeof(topic),
-             "%s/controls/%d/entities/%d/status",
-             KX_DEVICE_UUID, control_id, param_id);
-
+    snprintf(topic, sizeof(topic), "%s/quiiot/entities/%d/status", KX_DEVICE_UUID, param_id);
     snprintf(payload, sizeof(payload),
              "{\"id\":%d,\"value\":%.3f,\"ts\":%.3f}",
              param_id, value, _ts());
@@ -71,14 +74,33 @@ void kx_param_pub_status(int control_id, int param_id, float value)
     kx_mqtt_publish(topic, payload, 0, 0);
 }
 
+/**
+ * Publica el histórico (REPORT).
+ * Topic: {uuid}/quiiot/entities/{id}/report
+ */
+void kx_param_pub_report(int control_id, int param_id, float value)
+{
+    char topic[128];
+    char payload[128];
+
+    snprintf(topic, sizeof(topic), "%s/quiiot/entities/%d/report", KX_DEVICE_UUID, param_id);
+    snprintf(payload, sizeof(payload),
+             "{\"id\":%d,\"value\":%.3f,\"ts\":%.3f}",
+             param_id, value, _ts());
+
+    kx_mqtt_publish(topic, payload, 0, 0);
+}
+
+/**
+ * Publica el comando de escritura (SET).
+    * Topic: {uuid}/quiiot/entities/{id}/set
+ */
 void kx_param_pub_set(int control_id, int param_id, float value)
 {
     char topic[128];
     char payload[128];
 
-    snprintf(topic, sizeof(topic),
-             "%s/controls/%d/entities/%d/set",
-             KX_DEVICE_UUID, control_id, param_id);
+    snprintf(topic, sizeof(topic), "%s/quiiot/entities/%d/set", KX_DEVICE_UUID, param_id);
 
     snprintf(payload, sizeof(payload),
              "{\"id\":%d,\"value\":%.3f,\"ts\":%.3f}",
@@ -87,14 +109,16 @@ void kx_param_pub_set(int control_id, int param_id, float value)
     kx_mqtt_publish(topic, payload, 0, 0);
 }
 
+/**
+ * Publica un error genérico.
+ * Topic: {uuid}/quiiot/entities/{id}/status
+ */
 void kx_param_pub_error(int control_id, int param_id, const char *msg)
 {
     char topic[128];
     char payload[256];
 
-    snprintf(topic, sizeof(topic),
-             "%s/controls/%d/entities/%d/status",
-             KX_DEVICE_UUID, control_id, param_id);
+    snprintf(topic, sizeof(topic), "%s/quiiot/entities/%d/status", KX_DEVICE_UUID, param_id);
 
     snprintf(payload, sizeof(payload),
              "{\"id\":%d,\"error\":true,\"error_message\":\"%s\",\"ts\":%.3f}",
@@ -103,17 +127,33 @@ void kx_param_pub_error(int control_id, int param_id, const char *msg)
     kx_mqtt_publish(topic, payload, 0, 0);
 }
 
-// ── Tarea principal ───────────────────────────────────────────
-// No hace nada por sí sola — el protocolo llama a kx_param_pub_*
-// cuando tiene un valor listo. Esta tarea solo loguea el estado.
+/**
+ * Publica un error de Modbus detallado.
+ * Topic: {uuid}/quiiot/entities/{id}/status
+ */
+void kx_param_pub_error_modbus(int control_id, int param_id, uint16_t reg, const char *msg)
+{
+    char topic[128];
+    char payload[256];
+
+    snprintf(topic, sizeof(topic), "%s/quiiot/entities/%d/status", KX_DEVICE_UUID, param_id);
+    snprintf(payload, sizeof(payload),
+             "{\"id\":%d,\"error\":true,\"error_message\":\"%s\","
+             "\"reg\":\"0x%04x\",\"ts\":%.3f}",
+             param_id, msg, reg, _ts());
+
+    kx_mqtt_publish(topic, payload, 0, 0);
+}
+
+// --- Tarea y Control ---
+
 static void _telemetry_task(void *arg)
 {
     uint32_t seq = 0;
-
-    ESP_LOGI(TAG, "task started");
+    ESP_LOGI(TAG, "Telemetry task started");
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(10000));  // log de estado cada 10 s
+        vTaskDelay(pdMS_TO_TICKS(10000)); 
 
         ESP_LOGI(TAG, "alive seq=%" PRIu32 " heap=%" PRIu32 " rssi=%d mqtt=%s",
                  seq,
@@ -129,9 +169,9 @@ esp_err_t kx_telemetry_start(void)
     BaseType_t ret = xTaskCreate(
         _telemetry_task,
         "kx_telemetry",
-        KX_TASK_STACK_TELEMETRY,
+        4096, // Tamaño de stack recomendado
         NULL,
-        KX_TASK_PRIO_TELEMETRY,
+        2,    // Prioridad estándar
         NULL
     );
     return (ret == pdPASS) ? ESP_OK : ESP_FAIL;
