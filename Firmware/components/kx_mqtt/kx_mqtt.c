@@ -245,6 +245,10 @@ static void _subscribe_all(void)
     esp_mqtt_client_subscribe(s_client, "+/" KX_DEVICE_UUID "/controls/+/entities", 0);
     ESP_LOGI(TAG, "subscribed: +/%s/controls/+/entities", KX_DEVICE_UUID);
     vTaskDelay(pdMS_TO_TICKS(200));
+
+    esp_mqtt_client_subscribe(s_client,"+/" KX_DEVICE_UUID "/controls/+/entities/+/get", 0);
+    ESP_LOGI(TAG, "subscribed: +/%s/controls/+/entities/+/get", KX_DEVICE_UUID);
+    vTaskDelay(pdMS_TO_TICKS(200));
 }
 
 // ── Backpressure ──────────────────────────────────────────────

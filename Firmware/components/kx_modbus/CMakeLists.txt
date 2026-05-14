@@ -5,7 +5,9 @@ idf_component_register(
         kx_system
         kx_mqtt
         kx_param_store
+        kx_telemetry
         driver
         freertos
         esp_timer
+        json
 )

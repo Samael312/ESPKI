@@ -3,7 +3,7 @@
 #include "kx_mqtt.h"
 #include "kx_system.h"
 #include "../../main/kx_config.h"
-
+#include "kx_telemetry.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -53,6 +53,7 @@ static const char *TAG = "kx_modbus";
 
 static volatile bool s_running = false;
 static TaskHandle_t  s_task    = NULL;
+static SemaphoreHandle_t s_uart_mutex = NULL;
 
 // ── CRC16 Modbus ──────────────────────────────────────────────
 static uint16_t _crc16(const uint8_t *buf, size_t len)
@@ -68,20 +69,12 @@ static uint16_t _crc16(const uint8_t *buf, size_t len)
     return crc;
 }
 
-// ── Timestamp real ────────────────────────────────────────────
-static double _ts(void)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
-}
-
 // ── Init UART ─────────────────────────────────────────────────
 static esp_err_t _uart_init(void)
 {
     uart_config_t cfg = {
         .baud_rate           = KX_MODBUS_BAUD,
-        .data_bits           = UART_DATA_8_BITS,
+        .data_bits           = UART_DATA_8_BITS, 
         .parity              = UART_PARITY_DISABLE,
         .stop_bits           = UART_STOP_BITS_1,
         .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
@@ -180,6 +173,10 @@ static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
     uint8_t resp[16];
     int rx = -1;
 
+    if (xSemaphoreTake(s_uart_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        ESP_LOGW(TAG, "uart mutex timeout param=%d", param->param_id);
+        return -FLT_MAX;
+    }
     for (int attempt = 0; attempt < MODBUS_RETRY_COUNT && rx < 0; attempt++) {
         rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
         if (rx < 0) {
@@ -188,6 +185,7 @@ static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
     }
 
     if (rx < 0) {
+        xSemaphoreGive(s_uart_mutex);
         return -FLT_MAX;
     }
 
@@ -198,6 +196,8 @@ static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
     }
 
     uint16_t raw;
+
+    
 
     if (fc == MB_FC_READ_COILS || fc == MB_FC_READ_DISCRETE) {
         // FC01/FC02: bytecount=1, datos en resp[3], 1 coil = bit 0
@@ -225,6 +225,7 @@ static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
     if (value < param->minvalue) value = param->minvalue;
     if (value > param->maxvalue) value = param->maxvalue;
 
+    xSemaphoreGive(s_uart_mutex);
     return value;
 }
 
@@ -268,48 +269,34 @@ static void _print_progress(int control_id, int done, int total)
 // ── Publicar valor en MQTT ────────────────────────────────────
 static void _publish_value(int control_id, const kx_param_t *param, float value)
 {
-    char topic[128];
-    char payload[128];
-
-    snprintf(payload, sizeof(payload),
-             "{\"id\":%d,\"value\":%.3f,\"ts\":%.3f}",
-             param->param_id, value, _ts());
-
     if (param->function_read != 0) {
-        snprintf(topic, sizeof(topic),
-                 "%s/quiiot/entities/%d/report",
-                 KX_DEVICE_UUID, param->param_id);
-        kx_mqtt_publish(topic, payload, 0, 0);
 
-        snprintf(topic, sizeof(topic),
-                 "%s/quiiot/entities/%d/status",
-                 KX_DEVICE_UUID, param->param_id);
-        kx_mqtt_publish(topic, payload, 0, 0);
+        if (param->sampling != 0) {
+        // 1. Enviamos el REPORT (Dato histórico/telemetría)
+        kx_param_pub_report(control_id, param->param_id, value);
+        ESP_LOGW(TAG, "report → ctrl=%d param=%d val=%.3f", control_id, param->param_id, value);
+        }
+
+        // 2. Enviamos el STATUS (Estado actual del canal)
+        kx_param_pub_status(control_id, param->param_id, value);
+        
+        
+        
+        ESP_LOGD(TAG, "-> read ok ctrl=%d param=%d val=%.3f", control_id, param->param_id, value);
     } else {
-        snprintf(topic, sizeof(topic),
-                 "%s/quiiot/entities/%d/set",
-                 KX_DEVICE_UUID, param->param_id);
-        kx_mqtt_publish(topic, payload, 0, 0);
+        // Caso de escritura (SET)
+        kx_param_pub_set(control_id, param->param_id, value);
     }
 }
 
 // ── Publicar error de lectura ─────────────────────────────────
-static void _publish_error(int control_id, const kx_param_t *param,
-                            const char *reason)
+static void _publish_error(int control_id, const kx_param_t *param, const char *reason)
 {
-    char topic[128];
-    char payload[256];
-
-    snprintf(topic, sizeof(topic),
-             "%s/quiiot/entities/%d/status",
-             KX_DEVICE_UUID, param->param_id);
-
-    snprintf(payload, sizeof(payload),
-             "{\"id\":%d,\"error\":true,\"error_message\":\"%s\","
-             "\"reg\":\"0x%04x\",\"ts\":%.3f}",
-             param->param_id, reason, param->reg, _ts());
-
-    kx_mqtt_publish(topic, payload, 0, 0);
+    // Solo enviamos STATUS informando del error (no se envía REPORT si hay error)
+    kx_param_pub_error_modbus(control_id, param->param_id, (uint16_t)param->reg, reason);
+    
+    ESP_LOGW(TAG, "modbus error ctrl=%d param=%d reg=0x%04x: %s",
+             control_id, param->param_id, param->reg, reason);
 }
 
 // ── Callback de iteración: lee y publica cada param ──────────
@@ -357,6 +344,45 @@ static void _poll_param(int control_id,
     vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_PARAM_MS));
 }
 
+esp_err_t kx_modbus_read_one(int control_id, int param_id)
+{
+    const kx_control_params_t *ctrl = kx_param_store_get(control_id);
+    if (!ctrl || ctrl->slave_addr == 0) {
+        ESP_LOGW(TAG, "read_one: ctrl=%d not found or no slave_addr", control_id);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    const kx_param_t *param = kx_param_store_get_param(control_id, param_id);
+    if (!param) {
+        ESP_LOGW(TAG, "read_one: param=%d not found in ctrl=%d", param_id, control_id);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint8_t fc = (uint8_t)param->function_read;
+    bool is_read_fc = (fc == MB_FC_READ_COILS        ||
+                       fc == MB_FC_READ_DISCRETE      ||
+                       fc == MB_FC_READ_HOLDING_REGS  ||
+                       fc == MB_FC_READ_INPUT_REGS);
+
+    if (!is_read_fc) {
+        ESP_LOGW(TAG, "read_one: param=%d has no read FC", param_id);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    float value = _read_register((uint8_t)ctrl->slave_addr,
+                                  (uint16_t)param->reg,
+                                  fc, param);
+
+    if (value == -FLT_MAX) {
+        _publish_error(control_id, param, "modbus_timeout");
+        return ESP_FAIL;
+    }
+
+    _publish_value(control_id, param, value);
+    ESP_LOGI(TAG, "read_one: ctrl=%d param=%d val=%.3f", control_id, param_id, value);
+    return ESP_OK;
+}
+
 // ── Contar params legibles de un control ──────────────────────
 // Necesitamos el total antes de iterar para la barra.
 typedef struct { int count; } _count_ctx_t;
@@ -372,6 +398,61 @@ static void _count_readable(int control_id, const kx_param_t *param, void *user_
                        fc == MB_FC_READ_HOLDING_REGS ||
                        fc == MB_FC_READ_INPUT_REGS);
     if (is_read_fc) c->count++;
+}
+
+
+
+typedef struct {int control_id; int reads_triggered; } _update_ctx_t;
+
+static void _on_param_changed(int control_id,
+                               const kx_param_diff_t *diff,
+                               void *user_data)
+{
+    _update_ctx_t *ctx = (_update_ctx_t *)user_data;
+
+    ESP_LOGI(TAG, "param changed: ctrl=%d param=%d mask=0x%02x "
+             "(sampling=%d fc_read=%d fc_write=%d)",
+             control_id, diff->param_id, (unsigned)diff->changed,
+             diff->new_param.sampling,
+             diff->new_param.function_read,
+             diff->new_param.function_write);
+
+    // Solo releer por Modbus si cambió algo que afecta a la lectura
+    bool needs_read = (diff->changed & KX_PARAM_CHANGED_FUNCTION_READ) ||
+                      (diff->changed & KX_PARAM_CHANGED_REG)           ||
+                      (diff->changed & KX_PARAM_CHANGED_OFFSET)        ||
+                      (diff->changed & KX_PARAM_CHANGED_ADDITION)      ||
+                      (diff->changed & KX_PARAM_CHANGED_MINMAX)        ||
+                      (diff->changed & KX_PARAM_CHANGED_SAMPLING);     // nuevo sampling → publicar valor actual
+
+    if (needs_read) {
+        esp_err_t err = kx_modbus_read_one(control_id, diff->param_id);
+        if (err == ESP_OK) ctx->reads_triggered++;
+        // pequeño gap entre lecturas para no saturar el bus
+        vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
+    }
+}
+
+esp_err_t kx_modbus_update_changed(int control_id,
+                                    const char *payload,
+                                    size_t len)
+{
+    ESP_LOGI(TAG, "update_changed: ctrl=%d payload_len=%d", control_id, (int)len);
+
+    _update_ctx_t ctx = { .control_id = control_id, .reads_triggered = 0 };
+
+    int changed = kx_param_store_diff_and_update(payload, len, control_id,
+                                                  _on_param_changed, &ctx);
+
+    if (changed < 0) {
+        ESP_LOGE(TAG, "update_changed: diff failed ctrl=%d", control_id);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "update_changed: ctrl=%d — %d params changed, %d reads triggered",
+             control_id, changed, ctx.reads_triggered);
+
+    return ESP_OK;
 }
 
 // ── Tarea principal ───────────────────────────────────────────
@@ -442,6 +523,8 @@ esp_err_t kx_modbus_master_start(void)
 
     s_running = true;
 
+    s_uart_mutex = xSemaphoreCreateMutex();
+    
     BaseType_t ret = xTaskCreate(
         _modbus_task,
         "kx_modbus",
