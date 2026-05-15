@@ -454,6 +454,30 @@ void kx_param_store_set_progress_cb(kx_param_progress_cb_t cb)
     s_progress_cb = cb;
 }
 
+esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts)
+{
+    // Necesitamos acceso mutable al nodo; reutilizamos el hash privado.
+    uint32_t cidx = _ctrl_hash(control_id);
+    kx_ctrl_node_t *cn = s_hash.buckets[cidx];
+    while (cn) {
+        if (cn->ctrl.control_id == control_id) {
+            uint32_t pidx = _param_hash(param_id);
+            kx_param_node_t *pn = cn->ctrl.params.buckets[pidx];
+            while (pn) {
+                if (pn->param.param_id == param_id) {
+                    pn->param.ts_set = ts;
+                    return ESP_OK;
+                }
+                pn = pn->next;
+            }
+            return ESP_ERR_NOT_FOUND; // control existe pero param no
+        }
+        cn = cn->next;
+    }
+    return ESP_ERR_NOT_FOUND; // control no existe
+}
+
+
 // =============================================================
 // Persistencia NVS
 // La caché almacena controles con update_ts, slave_addr, uuid y

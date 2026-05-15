@@ -36,3 +36,4 @@ void kx_modbus_resume(void);
 
 // Lectura puntual bajo demanda.
 esp_err_t kx_modbus_read_one(int control_id, int param_id);
+esp_err_t kx_modbus_write_one(int control_id, int param_id, float value);

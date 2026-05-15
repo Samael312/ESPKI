@@ -101,6 +101,24 @@ static esp_err_t _wifi_init_sta(void)
     return ESP_FAIL;
 }
 
+static inline bool _is_quiiot_entities_topic(const char *topic)
+{
+    return (strncmp(topic, "quiiot/", 7) == 0 &&
+            strstr(topic, "/entities/") != NULL);
+}
+
+static bool _topic_last_segment_ends_with_set(const char *topic)
+{
+    const char *last_slash = strrchr(topic, '/');
+    if (!last_slash) return false;
+
+    const char *seg  = last_slash + 1;   // p.ej. "7748348set" o "get"
+    size_t      slen = strlen(seg);
+
+    // Mínimo "1set" (4 chars): al menos un dígito + "set"
+    return (slen >= 4 && strcmp(seg + slen - 3, "set") == 0);
+}
+
 // ── Router de mensajes MQTT entrantes ─────────────────────────
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
@@ -109,6 +127,18 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
     ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
              topic, len, heap_before);
     ESP_LOGD(TAG, "payload: %.*s", (int)len, payload);
+
+    if (_is_quiiot_entities_topic(topic)) {
+
+        if (_topic_last_segment_ends_with_set(topic)) {
+            // Bloque 1: orden de escritura — procesar
+            kx_param_handle_set(topic, payload, len);
+        } else {
+            // Bloque 2-3: "get" u otros — ignorar silenciosamente
+            ESP_LOGD(TAG, "entities topic ignorado: %s", topic);
+        }
+        return;
+    }
 
     if (strstr(topic, "/controls")) {
         kx_config_handle(topic, payload, len);

@@ -230,7 +230,8 @@ static void _publish_value(int control_id, const kx_param_t *param, float value)
         kx_param_pub_status(control_id, param->param_id, value);
         
     } else {
-        kx_param_pub_set(control_id, param->param_id, value);
+        ESP_LOGW(TAG, "param ctrl=%d param=%d no tiene función de lectura definida",
+                 control_id, param->param_id);
     }
 }
 
@@ -442,5 +443,113 @@ esp_err_t kx_modbus_read_one(int control_id, int param_id)
         return ESP_FAIL;
     }
     _publish_value(control_id, param, value);
+    return ESP_OK;
+}
+
+esp_err_t kx_modbus_write_one(int control_id, int param_id, float value)
+{
+    // ── Buscar param y control ────────────────────────────────
+    const kx_param_t *param = kx_param_store_get_param(control_id, param_id);
+    if (!param) {
+        ESP_LOGW(TAG, "write_one: param no encontrado ctrl=%d param=%d",
+                 control_id, param_id);
+        return ESP_ERR_NOT_FOUND;
+    }
+ 
+    const kx_control_params_t *ctrl = kx_param_store_get(control_id);
+    if (!ctrl || ctrl->slave_addr == 0) {
+        ESP_LOGW(TAG, "write_one: slave_addr inválido ctrl=%d", control_id);
+        return ESP_ERR_INVALID_STATE;
+    }
+ 
+    // ── Verificar que existe función de escritura ─────────────
+    uint8_t fc_write = (uint8_t)param->function_write;
+    if (fc_write != MB_FC_WRITE_SINGLE_COIL    &&
+        fc_write != MB_FC_WRITE_SINGLE_REG     &&
+        fc_write != MB_FC_WRITE_MULTIPLE_REGS) {
+        ESP_LOGW(TAG, "write_one: FC de escritura no soportado fc=0x%02x param=%d",
+                 fc_write, param_id);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+ 
+    // ── Transformación inversa value → raw ───────────────────
+    //
+    // _read_register aplica:
+    //   value = (float)(int16_t)raw
+    //   if (offset != 0.0f && offset != 1.0f) value *= offset;
+    //   value += addition;
+    //
+    // La inversa es:
+    //   adjusted = value - addition
+    //   raw = (offset != 0.0f && offset != 1.0f) ? adjusted / offset : adjusted
+    float adjusted = value - param->addition;
+    int16_t raw;
+ 
+    if (param->offset != 0.0f && param->offset != 1.0f) {
+        raw = (int16_t)(adjusted / param->offset);
+    } else {
+        raw = (int16_t)adjusted;
+    }
+ 
+    // Clampear al rango permitido (en unidades raw, pre-transformación)
+    if ((float)raw < param->minvalue) raw = (int16_t)param->minvalue;
+    if ((float)raw > param->maxvalue) raw = (int16_t)param->maxvalue;
+ 
+    ESP_LOGI(TAG, "write_one: ctrl=%d param=%d reg=0x%04x fc=0x%02x "
+             "slave=%d value=%.3f → raw=%d",
+             control_id, param_id, param->reg, fc_write,
+             ctrl->slave_addr, value, (int)raw);
+ 
+    // ── Construir trama Modbus FC 06 ──────────────────────────
+    //
+    // FC 06 — Write Single Register:
+    //   [addr][0x06][reg_hi][reg_lo][val_hi][val_lo]
+    // El esclavo responde con un eco idéntico de 6 bytes + CRC.
+    uint8_t frame[6] = {
+        (uint8_t)ctrl->slave_addr,
+        fc_write,
+        (uint8_t)((uint16_t)param->reg >> 8),
+        (uint8_t)((uint16_t)param->reg & 0xFF),
+        (uint8_t)((uint16_t)(uint16_t)raw >> 8),
+        (uint8_t)((uint16_t)(uint16_t)raw & 0xFF),
+    };
+ 
+    uint8_t resp[16];
+    int rx = -1;
+ 
+    for (int attempt = 0; attempt < MODBUS_RETRY_COUNT && rx < 0; attempt++) {
+        rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
+        if (rx < 0) {
+            ESP_LOGD(TAG, "write_one: intento %d fallido, reintentando...", attempt + 1);
+            vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
+        }
+    }
+ 
+    if (rx < 0) {
+        ESP_LOGW(TAG, "write_one: sin respuesta tras %d intentos ctrl=%d param=%d",
+                 MODBUS_RETRY_COUNT, control_id, param_id);
+        return ESP_FAIL;
+    }
+ 
+    // ── Validar respuesta eco (FC 06) ─────────────────────────
+    //
+    // Una respuesta válida de FC 06 tiene exactamente los mismos
+    // primeros 4 bytes que la trama enviada (addr, fc, reg_hi, reg_lo).
+    // Los bytes 4-5 contienen el valor que el esclavo aceptó.
+    if (rx < 6 ||
+        resp[0] != frame[0] ||   // slave_addr
+        resp[1] != frame[1] ||   // function code
+        resp[2] != frame[2] ||   // reg_hi
+        resp[3] != frame[3])     // reg_lo
+    {
+        ESP_LOGW(TAG, "write_one: respuesta inesperada (rx=%d) ctrl=%d param=%d",
+                 rx, control_id, param_id);
+        return ESP_FAIL;
+    }
+ 
+    uint16_t echo_val = ((uint16_t)resp[4] << 8) | resp[5];
+    ESP_LOGI(TAG, "write_one: OK ctrl=%d param=%d raw_sent=%d raw_echo=%d",
+             control_id, param_id, (int)(uint16_t)raw, (int)echo_val);
+ 
     return ESP_OK;
 }

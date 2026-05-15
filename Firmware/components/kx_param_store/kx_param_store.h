@@ -55,6 +55,7 @@ typedef struct {
     int     mask;
     int     view;
     int     sampling;
+    double  ts_set;
 } kx_param_t;
 
 // ── Nodo de la lista de params (hash nivel 2) ─────────────────
@@ -135,13 +136,15 @@ void kx_param_store_set_uuid(int control_id, const char *uuid);
 // Devuelve el update_ts almacenado para un control (0.0 si no existe).
 double kx_param_store_get_update_ts(int control_id);
 
-// Actualiza el update_ts de un control ya existente (sin tocar entities).
-void kx_param_store_set_update_ts(int control_id, double ts);
+void   kx_param_store_set_update_ts(int control_id, double ts);
+void   kx_param_store_clear_entities(int control_id);
 
 // Borra todas las entities de un control y marca entities_ready=false.
 // Llamar antes de relanzar entities-discovery cuando el ts es mayor.
 void kx_param_store_clear_entities(int control_id);
 
+
+esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts);
 // ── Persistencia NVS ─────────────────────────────────────────
 // La caché NVS guarda controles (slave_addr, uuid, update_ts).
 // Las entities se guardan en NVS junto al control.
