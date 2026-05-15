@@ -17,12 +17,6 @@
 //
 //   Toda la memoria se asigna en PSRAM (heap_caps_malloc) con
 //   fallback a RAM interna si PSRAM no está disponible.
-//
-//   Cache NVS basado en update_ts por control:
-//     - Se guarda update_ts junto a cada control
-//     - Al recibir controls.json se compara update_ts entrante
-//       con el almacenado; si el entrante es mayor se borran las
-//       entities del control y se relanza entities-discovery
 // =============================================================
 
 // ── Límites y dimensiones de las tablas hash ──────────────────
@@ -55,6 +49,11 @@ typedef struct {
     int     mask;
     int     view;
     int     sampling;
+
+    // ── Control de escrituras entrantes (topic {id}set) ───────
+    // Almacena el ts del último mensaje set procesado.
+    // Un mensaje entrante solo se ejecuta si su ts > ts_set.
+    double  ts_set;   // 0.0 = nunca procesado
 } kx_param_t;
 
 // ── Nodo de la lista de params (hash nivel 2) ─────────────────
@@ -76,7 +75,7 @@ typedef struct {
     int              control_id;
     int              slave_addr;
     char             uuid[64];
-    double           update_ts;      // timestamp del controls.json
+    double           update_ts;
     kx_param_hash_t  params;
     bool             entities_ready;
 } kx_control_t;
@@ -127,23 +126,19 @@ void kx_param_store_set_slave_addr(int control_id, int slave_addr);
 void kx_param_store_set_uuid(int control_id, const char *uuid);
 
 // ── update_ts por control ─────────────────────────────────────
-
-// Devuelve el update_ts almacenado para un control (0.0 si no existe).
 double kx_param_store_get_update_ts(int control_id);
+void   kx_param_store_set_update_ts(int control_id, double ts);
+void   kx_param_store_clear_entities(int control_id);
 
-// Actualiza el update_ts de un control ya existente (sin tocar entities).
-void kx_param_store_set_update_ts(int control_id, double ts);
-
-// Borra todas las entities de un control y marca entities_ready=false.
-// Llamar antes de relanzar entities-discovery cuando el ts es mayor.
-void kx_param_store_clear_entities(int control_id);
+// ── ts_set por param ──────────────────────────────────────────
+//
+// Actualiza el campo ts_set de un param concreto dentro de un
+// control. Retorna ESP_ERR_NOT_FOUND si el param no existe.
+// El campo ts_set NO se persiste en NVS (es estado volátil de
+// escritura en caliente; al reiniciar se acepta siempre el primero).
+esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts);
 
 // ── Persistencia NVS ─────────────────────────────────────────
-// La caché NVS guarda controles (slave_addr, uuid, update_ts).
-// Las entities se guardan en NVS junto al control.
-// Al arranque se valida magic+uuid+fw; si es válido se restaura
-// el estado completo. La decisión de refrescar entities se toma
-// comparando update_ts en kx_config_handler.
 esp_err_t kx_param_store_save_nvs(void);
 esp_err_t kx_param_store_load_nvs(void);
 esp_err_t kx_param_store_clear_nvs(void);
@@ -157,5 +152,4 @@ static inline const kx_control_params_t *kx_param_store_get(int control_id)
     return kx_param_store_get_ctrl(control_id);
 }
 
-// Alias para error pub
 void kx_param_pub_error(int control_id, int param_id, const char *msg);

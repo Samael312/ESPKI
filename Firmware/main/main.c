@@ -101,34 +101,94 @@ static esp_err_t _wifi_init_sta(void)
     return ESP_FAIL;
 }
 
+// ── Helpers de clasificación de topic ─────────────────────────
+
+// Devuelve true si el topic pertenece al espacio quiiot/{uuid}/entities/*
+// Es decir, empieza por "quiiot/" (no por "+/").
+static inline bool _is_quiiot_entities_topic(const char *topic)
+{
+    return (strncmp(topic, "quiiot/", 7) == 0 &&
+            strstr(topic, "/entities/") != NULL);
+}
+
+// Devuelve true si el último segmento del topic termina en "set".
+// Ejemplos que pasan: "...entities/7748348set"
+// Ejemplos que NO pasan: "...entities/get", "...entities/7748348"
+static bool _topic_last_segment_ends_with_set(const char *topic)
+{
+    const char *last_slash = strrchr(topic, '/');
+    if (!last_slash) return false;
+
+    const char *seg  = last_slash + 1;   // p.ej. "7748348set" o "get"
+    size_t      slen = strlen(seg);
+
+    // Mínimo "1set" (4 chars): al menos un dígito + "set"
+    return (slen >= 4 && strcmp(seg + slen - 3, "set") == 0);
+}
+
 // ── Router de mensajes MQTT entrantes ─────────────────────────
+//
+// Orden de evaluación (primero gana):
+//
+//  1. quiiot/{uuid}/entities/{id}set  → kx_param_handle_set()
+//     Órdenes de escritura desde la plataforma.
+//
+//  2. quiiot/{uuid}/entities/get      → ignorar silenciosamente.
+//     El topic "get" es retained y llega con cada reconexión;
+//     no tiene acción en el dispositivo.
+//
+//  3. quiiot/{uuid}/entities/*        → ignorar (cualquier otro
+//     sub-topic de entities que no sea set ni get).
+//
+//  4. +/{uuid}/controls/*             → kx_config_handle()
+//     Configuración: device, controls, entities de control.
+//
+//  5. +/{uuid}                        → kx_config_handle()
+//     Device JSON inicial.
+//
+//  6. Cualquier otro                  → warning y descartar.
+//
+// IMPORTANTE: los bloques 1-3 consumen todos los topics que
+// contienen "/entities/" bajo "quiiot/", evitando que lleguen
+// a kx_config_handle y generen el warning "could not extract
+// control_id".
+// ─────────────────────────────────────────────────────────────
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
-    uint32_t heap_before = kx_system_heap_free();
-
     ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
-             topic, len, heap_before);
+             topic, len, kx_system_heap_free());
     ESP_LOGD(TAG, "payload: %.*s", (int)len, payload);
 
+    // ── Bloque 1-3: topics quiiot/{uuid}/entities/* ───────────
+    if (_is_quiiot_entities_topic(topic)) {
+
+        if (_topic_last_segment_ends_with_set(topic)) {
+            // Bloque 1: orden de escritura — procesar
+            kx_param_handle_set(topic, payload, len);
+        } else {
+            // Bloque 2-3: "get" u otros — ignorar silenciosamente
+            ESP_LOGD(TAG, "entities topic ignorado: %s", topic);
+        }
+        return;
+    }
+
+    // ── Bloque 4: configuración de controles ──────────────────
     if (strstr(topic, "/controls")) {
         kx_config_handle(topic, payload, len);
         return;
     }
 
+    // ── Bloque 5: device JSON ─────────────────────────────────
     if (strstr(topic, KX_DEVICE_UUID)) {
         kx_config_handle(topic, payload, len);
         return;
     }
 
+    // ── Bloque 6: sin handler ─────────────────────────────────
     ESP_LOGW(TAG, "unhandled topic: %s", topic);
 }
 
 // ── Intentar cargar controles desde NVS ──────────────────────
-// Restaura el store completo (metadatos + entities + update_ts).
-// Si la caché es válida, el Modbus puede arrancar directamente.
-// La comparación de update_ts ocurrirá cuando llegue el
-// controls.json tras el controls, y el handler
-// descartará la caché sólo si hay cambios.
 static bool _try_load_from_nvs(void)
 {
     kx_param_store_init();
@@ -168,17 +228,14 @@ static void _print_boot_banner(bool from_cache)
 // ── app_main ──────────────────────────────────────────────────
 void app_main(void)
 {
-    // 1. Sistema base: NVS, device_id, boot count
+    // 1. Sistema base
     ESP_ERROR_CHECK(kx_system_init());
 
-    // 2. Intentar cargar controles + entities desde NVS
-    //    Si hay caché válida, el Modbus arrancará sin esperar MQTT.
-    //    Cuando llegue el controls.json (tras controls)
-    //    el handler comparará update_ts y actualizará lo que haya cambiado.
+    // 2. Caché NVS
     bool from_cache = _try_load_from_nvs();
     _print_boot_banner(from_cache);
 
-    // 3. WiFi — bloqueante hasta IP o timeout
+    // 3. WiFi
     if (_wifi_init_sta() != ESP_OK) {
         ESP_LOGE(TAG, "no WiFi, rebooting in 10s");
         vTaskDelay(pdMS_TO_TICKS(10000));
@@ -188,18 +245,13 @@ void app_main(void)
     // 4. NTP
     _ntp_init();
 
-    // 5. MQTT — al conectarse publicará device-status online
-    //    y el bridge responderá con device.json → controls
-    //    → controls.json → entities-discovery (si ts mayor) → entities
+    // 5. MQTT
     ESP_ERROR_CHECK(kx_mqtt_start(_on_mqtt_message));
 
-    // 6. Telemetría periódica
+    // 6. Telemetría
     ESP_ERROR_CHECK(kx_telemetry_start());
 
-    // 7. Modbus RTU maestro
-    //    Si hay caché válida arranca de inmediato (kx_param_store_is_ready()
-    //    ya es true). Si no, esperará en el bucle interno hasta que
-    //    entities-discovery complete.
+    // 7. Modbus RTU
     ESP_ERROR_CHECK(kx_modbus_master_start());
 
     ESP_LOGI(TAG, "init done — device_id=%s fw=%s cache=%s",
