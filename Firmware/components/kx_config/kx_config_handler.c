@@ -17,18 +17,9 @@
 
 static const char *TAG = "kx_config";
 
-// ── Estado: entities ya disponibles (desde NVS) ───────────────
-static volatile bool s_entities_ready = false;
-
-void kx_config_set_entities_ready(bool ready)
-{
-    s_entities_ready = ready;
-    if (ready) {
-        ESP_LOGI(TAG, "entities marked as ready (from NVS cache)");
-    }
-}
-
-// ── Timestamp ─────────────────────────────────────────────────
+// =============================================================
+// Timestamp
+// =============================================================
 static double _ts(void)
 {
     struct timeval tv;
@@ -36,7 +27,9 @@ static double _ts(void)
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
-// ── ACK / Error ───────────────────────────────────────────────
+// =============================================================
+// ACK / Error
+// =============================================================
 static void _send_ack(const char *config_type)
 {
     char payload[256];
@@ -57,18 +50,14 @@ static void _send_error(const char *config_type,
         "\"config_type\":\"%s\","
         "\"error_code\":\"%s\","
         "\"detail\":\"%s\"}",
-        KX_DEVICE_UUID, _ts(),
-        config_type, error_code, detail);
+        KX_DEVICE_UUID, _ts(), config_type, error_code, detail);
     kx_mqtt_publish(KX_TOPIC_CONFIG_ERROR, payload, 1, 0);
     ESP_LOGW(TAG, "error '%s' for '%s': %s", error_code, config_type, detail);
 }
 
-// ── Helpers de topic ──────────────────────────────────────────
-// Rutas posibles:
-//   …/controls                    → "controls_list"
-//   …/controls/21601              → "control_single"
-//   …/controls/21601/entities     → "entities"
-//   …/{uuid}  (sin /controls)     → "device"
+// =============================================================
+// Helpers de topic
+// =============================================================
 static const char *_config_type_from_topic(const char *topic)
 {
     if (strstr(topic, "/entities")) return "entities";
@@ -76,9 +65,7 @@ static const char *_config_type_from_topic(const char *topic)
     const char *p = strstr(topic, "/controls");
     if (p) {
         p += strlen("/controls");
-        // termina aquí → lista
         if (*p == '\0' || *p == ' ') return "controls_list";
-        // hay algo tras la barra → control individual
         if (*p == '/') return "control_single";
         return "controls_list";
     }
@@ -95,51 +82,49 @@ static int _control_id_from_topic(const char *topic)
     return atoi(p);
 }
 
-// ── Validación de device config ───────────────────────────────
-static esp_err_t _validate_device_config(cJSON *root)
+// =============================================================
+// controls-discovery
+//
+// Publica en {uuid}/controls con _type=controls-discovery.
+// El bridge escucha ese topic y responde publicando el
+// controls.json en +/{uuid}/controls, que el dispositivo
+// recibe mediante su suscripción +/{uuid}/controls.
+//
+// Referencia:
+//   snprintf(topic, ..., "%s/controls", client_id);
+//   snprintf(payload, ..., "{\"_type\": \"controls-discovery\",
+//                            \"timestamp\": %.3f}", gettimestamp());
+// =============================================================
+void kx_config_request_controls(void)
 {
-    if (!cJSON_GetObjectItem(root, "uuid")) return ESP_FAIL;
-    return ESP_OK;
-}
-
-// ── Publicar control-status ───────────────────────────────────
-static void _publish_control_status(int control_id, const char *uuid)
-{
-    char topic[128];
+    char topic[MQTT_MAX_TOPIC_SIZE];
     char payload[256];
 
-    snprintf(topic, sizeof(topic),
-             "%s/controls/%d/status",
-             KX_DEVICE_UUID, control_id);
+    // Topic: {uuid}/controls   
+    snprintf(topic, sizeof(topic), "%s/controls", KX_DEVICE_UUID);
 
     snprintf(payload, sizeof(payload),
-        "{"
-        "\"_type\": \"control-status\","
-        "\"id\": %d,"
-        "\"uuid\": \"%s\","
-        "\"connection_status\": \"online\","
-        "\"link\": {\"detected\": \"online\"},"
-        "\"timestamp\": %.3f"
-        "}",
-        control_id, uuid, _ts());
+             "{\"_type\": \"controls-discovery\", \"timestamp\": %.3f}",
+             _ts());
 
     esp_err_t err = kx_mqtt_publish(topic, payload, 1, 0);
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "control-status online → ctrl=%d uuid=%s",
-                 control_id, uuid);
+        ESP_LOGI(TAG, "controls-discovery → %s", topic);
     } else {
-        ESP_LOGW(TAG, "control-status publish failed → ctrl=%d", control_id);
+        ESP_LOGW(TAG, "controls-discovery publish failed");
     }
 }
 
-// ── Solicitar entities ────────────────────────────────────────
+// =============================================================
+// entities-discovery por control
+// =============================================================
 static void _request_entities(int control_id)
 {
     char topic[128];
     char payload[128];
 
     snprintf(topic, sizeof(topic),
-             KX_DEVICE_UUID "/controls/%d/entities", control_id);
+             "%s/controls/%d/entities", KX_DEVICE_UUID, control_id);
 
     snprintf(payload, sizeof(payload),
              "{\"_type\": \"entities-discovery\", \"timestamp\": %.3f}",
@@ -153,7 +138,32 @@ static void _request_entities(int control_id)
     }
 }
 
-// ── Callback de progreso ──────────────────────────────────────
+// =============================================================
+// control-status online
+// =============================================================
+static void _publish_control_status(int control_id, const char *uuid)
+{
+    char topic[128];
+    char payload[256];
+
+    snprintf(topic, sizeof(topic),
+             "%s/controls/%d/status", KX_DEVICE_UUID, control_id);
+    snprintf(payload, sizeof(payload),
+        "{\"_type\":\"control-status\","
+        "\"id\":%d,"
+        "\"uuid\":\"%s\","
+        "\"connection_status\":\"online\","
+        "\"link\":{\"detected\":\"online\"},"
+        "\"timestamp\":%.3f}",
+        control_id, uuid, _ts());
+
+    kx_mqtt_publish(topic, payload, 1, 0);
+    ESP_LOGI(TAG, "control-status online → ctrl=%d uuid=%s", control_id, uuid);
+}
+
+// =============================================================
+// Callback de progreso de entities
+// =============================================================
 static void _on_entities_progress(int control_id, int received, int total)
 {
     if (total <= 0) return;
@@ -164,188 +174,270 @@ static void _on_entities_progress(int control_id, int received, int total)
     }
 }
 
-// ── Procesar UN control ───────────────────────────────────────
-// Extrae control_id, uuid y slave_addr del objeto JSON del control.
-// Publica control-status y lanza entities-discovery si hace falta.
-static void _process_single_control(cJSON *ctrl, int hint_control_id, const char *payload, size_t len)
+// =============================================================
+// Procesar un control del controls.json
+//
+// Lógica de update_ts:
+//   · ts_incoming == 0  → sin ts en el JSON, siempre relanzar
+//   · ts_incoming > ts_stored  → pausa Modbus, borra entities,
+//     actualiza ts, lanza discovery, reanuda Modbus
+//   · ts_incoming <= ts_stored → caché válida, sin discovery
+// =============================================================
+static void _process_single_control(cJSON *ctrl_json, int hint_control_id)
 {
-    // control_id: del JSON o del topic como fallback
+    // ── control_id ────────────────────────────────────────────
     int control_id = hint_control_id;
-    cJSON *id_field = cJSON_GetObjectItem(ctrl, "control_id");
-    if (!id_field) id_field = cJSON_GetObjectItem(ctrl, "id");
-    if (id_field && cJSON_IsNumber(id_field)) {
+    cJSON *id_field = cJSON_GetObjectItem(ctrl_json, "control_id");
+    if (!id_field) id_field = cJSON_GetObjectItem(ctrl_json, "id");
+    if (id_field && cJSON_IsNumber(id_field))
         control_id = (int)id_field->valuedouble;
-    }
 
     if (control_id <= 0) {
         ESP_LOGW(TAG, "control: could not determine control_id, skipping");
         return;
     }
 
-    // uuid
+    // ── uuid ──────────────────────────────────────────────────
     char uuid[64] = "";
-    cJSON *u = cJSON_GetObjectItem(ctrl, "uuid");
-    if (u && cJSON_IsString(u)) {
-        snprintf(uuid, sizeof(uuid), "%s", u->valuestring);
-    }
+    cJSON *u = cJSON_GetObjectItem(ctrl_json, "uuid");
+    if (u && cJSON_IsString(u)) snprintf(uuid, sizeof(uuid), "%s", u->valuestring);
 
-    // slave_addr — puede venir con distintos nombres según el broker
+    // ── slave_addr ────────────────────────────────────────────
     int slave_addr = 0;
     const char *addr_keys[] = {
         "slave_addr", "modbus_address", "control_address",
         "address", "rtu_address", NULL
     };
-    for (int k = 0; addr_keys[k] != NULL; k++) {
-        cJSON *sa = cJSON_GetObjectItem(ctrl, addr_keys[k]);
-        if (sa && cJSON_IsNumber(sa)) {
-            slave_addr = (int)sa->valuedouble;
-            ESP_LOGI(TAG, "ctrl=%d slave_addr=%d (key='%s')",
-                     control_id, slave_addr, addr_keys[k]);
-            break;
-        }
+    for (int k = 0; addr_keys[k]; k++) {
+        cJSON *sa = cJSON_GetObjectItem(ctrl_json, addr_keys[k]);
+        if (sa && cJSON_IsNumber(sa)) { slave_addr = (int)sa->valuedouble; break; }
     }
 
-    if (slave_addr > 0) {
-        kx_param_store_set_slave_addr(control_id, slave_addr);
-    } else {
-        ESP_LOGW(TAG, "ctrl=%d: no slave_addr found in JSON", control_id);
-    }
+    // ── update_ts ─────────────────────────────────────────────
+    double ts_incoming = 0.0;
+    cJSON *ts_field = cJSON_GetObjectItem(ctrl_json, "update_ts");
+    if (ts_field && cJSON_IsNumber(ts_field)) ts_incoming = ts_field->valuedouble;
 
-    ESP_LOGI(TAG, "control id=%d uuid=%s | entities_cached=%s",
-             control_id, uuid, s_entities_ready ? "YES" : "NO");
+    double ts_stored = kx_param_store_get_update_ts(control_id);
 
+    ESP_LOGI(TAG, "ctrl=%d uuid=%s slave=%d ts_in=%.3f ts_stored=%.3f",
+             control_id, uuid, slave_addr, ts_incoming, ts_stored);
+
+    // ── Actualizar metadatos ──────────────────────────────────
+    if (slave_addr > 0) kx_param_store_set_slave_addr(control_id, slave_addr);
+    if (uuid[0])        kx_param_store_set_uuid(control_id, uuid);
+
+    // ── Publicar control-status ───────────────────────────────
     _publish_control_status(control_id, uuid);
     vTaskDelay(pdMS_TO_TICKS(50));
 
-   if (s_entities_ready) {
-        // Si ya hay caché, no pedimos discovery, pero ejecutamos el DIFF
-        // para ver si el mensaje actual trae parámetros nuevos.
-        ESP_LOGI(TAG, "ctrl=%d: Cache active, checking for updates in payload...", control_id);
-        
-        // Aquí usamos la función que ya definiste abajo: kx_modbus_update_changed
-        kx_modbus_update_changed(control_id, payload, len);
+    // ── Decisión de entities ──────────────────────────────────
+    bool need_discovery = false;
+
+    if (ts_incoming == 0.0) {
+        ESP_LOGI(TAG, "ctrl=%d: no update_ts — forcing entities-discovery", control_id);
+        need_discovery = true;
+
+    } else if (ts_incoming > ts_stored) {
+        ESP_LOGI(TAG, "ctrl=%d: ts newer (%.3f > %.3f) — refreshing entities",
+                 control_id, ts_incoming, ts_stored);
+
+        // pause() espera a que el foreach actual termine antes de retornar
+        if (kx_modbus_master_is_running()) kx_modbus_pause();
+
+        kx_param_store_clear_entities(control_id);
+        kx_param_store_set_update_ts(control_id, ts_incoming);
+
+        if (kx_modbus_master_is_running()) kx_modbus_resume();
+
+        need_discovery = true;
+
     } else {
-        // Si no hay nada, pedimos la lista completa al broker
+        ESP_LOGI(TAG, "ctrl=%d: ts up-to-date (%.3f) — using cached entities",
+                 control_id, ts_stored);
+    }
+
+    if (need_discovery) {
         _request_entities(control_id);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
-// ── controls_list: {"controls": [...]} ───────────────────────
-static esp_err_t _handle_controls_list(cJSON *root, const char *payload, size_t len)
+// =============================================================
+// controls_list
+//
+// El bridge puede responder con distintas estructuras.
+// Se prueban en orden:
+//   1. {"controls": [...]}         — array bajo clave "controls"
+//   2. [...]                       — array en raíz
+//   3. {"control": {...}}          — objeto único bajo "control"
+//   4. Objeto raíz con control_id  — objeto único en raíz
+// =============================================================
+static esp_err_t _handle_controls_list(cJSON *root)
 {
+    // ── Log del payload para diagnóstico ─────────────────────
+    char *dbg = cJSON_PrintUnformatted(root);
+    if (dbg) {
+        ESP_LOGI(TAG, "controls payload: %.300s", dbg);
+        free(dbg);
+    }
+
+    // ── Caso 1: {"controls": [...]} ───────────────────────────
     cJSON *controls = cJSON_GetObjectItem(root, "controls");
-    if (!controls || !cJSON_IsArray(controls)) {
-        ESP_LOGW(TAG, "controls_list: missing 'controls' array");
-        return ESP_FAIL;
-    }
-
-    int count = cJSON_GetArraySize(controls);
-    ESP_LOGI(TAG, "controls_list: %d controls", count);
-
-    kx_mqtt_resize_queue(count);
-    if (!s_entities_ready) {
+    if (controls && cJSON_IsArray(controls)) {
+        int count = cJSON_GetArraySize(controls);
+        ESP_LOGI(TAG, "controls_list (key=controls): %d items", count);
+        kx_mqtt_resize_queue(count);
         kx_param_store_set_expected(count);
+        for (int i = 0; i < count; i++) {
+            cJSON *ctrl = cJSON_GetArrayItem(controls, i);
+            if (ctrl) _process_single_control(ctrl, -1);
+        }
+        return ESP_OK;
     }
 
-    for (int i = 0; i < count; i++) {
-        cJSON *ctrl = cJSON_GetArrayItem(controls, i);
-        if (ctrl) _process_single_control(ctrl, -1, payload, len);
+    // ── Caso 2: array en raíz ─────────────────────────────────
+    if (cJSON_IsArray(root)) {
+        int count = cJSON_GetArraySize(root);
+        ESP_LOGI(TAG, "controls_list (root array): %d items", count);
+        kx_mqtt_resize_queue(count);
+        kx_param_store_set_expected(count);
+        for (int i = 0; i < count; i++) {
+            cJSON *ctrl = cJSON_GetArrayItem(root, i);
+            if (ctrl) _process_single_control(ctrl, -1);
+        }
+        return ESP_OK;
     }
 
-    return ESP_OK;
+    // ── Caso 3: {"control": {...}} ────────────────────────────
+    cJSON *single = cJSON_GetObjectItem(root, "control");
+    if (single && cJSON_IsObject(single)) {
+        ESP_LOGI(TAG, "controls_list (key=control): single object");
+        kx_mqtt_resize_queue(1);
+        kx_param_store_set_expected(1);
+        _process_single_control(single, -1);
+        return ESP_OK;
+    }
+
+    // ── Caso 4: el raíz ES el objeto control ──────────────────
+    cJSON *id_check = cJSON_GetObjectItem(root, "control_id");
+    if (!id_check) id_check = cJSON_GetObjectItem(root, "id");
+    if (id_check && cJSON_IsNumber(id_check)) {
+        ESP_LOGI(TAG, "controls_list (root object): single control id=%.0f",
+                 id_check->valuedouble);
+        kx_mqtt_resize_queue(1);
+        kx_param_store_set_expected(1);
+        _process_single_control(root, -1);
+        return ESP_OK;
+    }
+
+    // ── Sin estructura reconocible ────────────────────────────
+    ESP_LOGW(TAG, "controls_list: unrecognized JSON structure");
+    // Volcar claves de primer nivel para diagnóstico
+    cJSON *item = root->child;
+    while (item) {
+        ESP_LOGW(TAG, "  key: \"%s\" type=%d", item->string ? item->string : "(null)", item->type);
+        item = item->next;
+    }
+    return ESP_FAIL;
 }
 
-// ── control_single: topic …/controls/NUM ─────────────────────
-// El payload puede ser el objeto control directamente
-// o envolver un array "controls":[...].
-static esp_err_t _handle_control_single(cJSON *root, int topic_control_id, const char *payload, size_t len)
+// =============================================================
+// control_single: topic …/controls/NUM
+// =============================================================
+static esp_err_t _handle_control_single(cJSON *root, int topic_control_id)
 {
     cJSON *controls = cJSON_GetObjectItem(root, "controls");
     if (controls && cJSON_IsArray(controls)) {
         int count = cJSON_GetArraySize(controls);
-        ESP_LOGI(TAG, "control_single: found controls array with %d items", count);
         kx_mqtt_resize_queue(count);
-        if (!s_entities_ready) kx_param_store_set_expected(count);
+        kx_param_store_set_expected(count);
         for (int i = 0; i < count; i++) {
             cJSON *ctrl = cJSON_GetArrayItem(controls, i);
-            if (ctrl) _process_single_control(ctrl, topic_control_id, payload, len);
+            if (ctrl) _process_single_control(ctrl, topic_control_id);
         }
     } else {
-        // El raíz ES el objeto control
+        // Determinar si el control ya existe para no alterar expected
+        int ctrl_id = topic_control_id;
+        cJSON *id_f = cJSON_GetObjectItem(root, "control_id");
+        if (!id_f) id_f = cJSON_GetObjectItem(root, "id");
+        if (id_f && cJSON_IsNumber(id_f)) ctrl_id = (int)id_f->valuedouble;
+
+        bool already_exists = (kx_param_store_get_ctrl(ctrl_id) != NULL);
         kx_mqtt_resize_queue(1);
-        if (!s_entities_ready) {
-            // Garantizar que expected sea al menos count+1 para que
-            // is_ready() no dispare antes de tiempo cuando llegan
-            // múltiples topics individuales.
-            int expected = kx_param_store_count() + 1;
-            kx_param_store_set_expected(expected);
+
+        if (!already_exists) {
+            kx_param_store_set_expected(kx_param_store_count() + 1);
+            ESP_LOGI(TAG, "control_single: new ctrl=%d, expected -> %d",
+                     ctrl_id, kx_param_store_count() + 1);
+        } else {
+            // Control existente: expected ya fue fijado, no cambiar
+            ESP_LOGI(TAG, "control_single: update existing ctrl=%d, expected unchanged",
+                     ctrl_id);
         }
-        _process_single_control(root, topic_control_id, payload, len);
+
+        _process_single_control(root, topic_control_id);
     }
+    return ESP_OK;
+}
+
+// =============================================================
+// device: +/{uuid}
+// Valida, envía ACK y lanza controls-discovery activo.
+// =============================================================
+static esp_err_t _handle_device(cJSON *root)
+{
+    if (!cJSON_GetObjectItem(root, "uuid")) return ESP_FAIL;
+
+    ESP_LOGI(TAG, "device.json received — launching controls-discovery");
+    _send_ack("device");
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+    kx_config_request_controls();
 
     return ESP_OK;
 }
 
-// ── Handler principal ─────────────────────────────────────────
+// =============================================================
+// Handler principal
+// =============================================================
 void kx_config_handle(const char *topic, const char *payload, size_t len)
 {
     const char *config_type = _config_type_from_topic(topic);
-    ESP_LOGI(TAG, "Incoming MQTT message | Topic: %s | Type: %s | Size: %d bytes | IN: ", 
-             topic, config_type, (int)len);
 
     // ── entities ─────────────────────────────────────────────
     if (strcmp(config_type, "entities") == 0) {
-    int control_id = _control_id_from_topic(topic);
-    if (control_id <= 0) { 
-        ESP_LOGW(TAG, "entities topic without control_id: %s", topic);
-        _send_error("entities", "MISSING_FIELD", "control_id not found in topic");
-        return;
-    }
-
-    ESP_LOGI(TAG, "entities received: ctrl=%d size=%d heap=%" PRIu32,
-            control_id, (int)len, kx_system_heap_free());
-
-    if (s_entities_ready, "entities") {
-        int entitie_topic_id = _control_id_from_topic(topic);
-        if (entitie_topic_id > 0) {
-            ESP_LOGI(TAG, "entities topic for control_id=%d", entitie_topic_id);
-            _request_entities(entitie_topic_id);
-        } else {
-            ESP_LOGW(TAG, "entities topic without valid control_id: %s", topic);
-            _send_error("entities", "MISSING_FIELD", "control_id not found in topic");
-        }
-        // ── ACTUALIZACIÓN: el store ya tiene datos, buscar diferencias
-        ESP_LOGI(TAG, "entities UPDATE for ctrl=%d — running diff", control_id);
-
-        esp_err_t err = kx_modbus_update_changed(control_id, payload, len);
-
-        if (err == ESP_OK) {
-            _send_ack("entities_update");
-        } else {
-            _send_error("entities_update", "UPDATE_ERROR", "diff/modbus failed");
+        int control_id = _control_id_from_topic(topic);
+        if (control_id <= 0) {
+            ESP_LOGW(TAG, "entities: could not extract control_id from: %s", topic);
+            return;
         }
 
-    } else {
-        // ── DESCARGA INICIAL: comportamiento existente sin cambios
+        ESP_LOGI(TAG, "entities received: topic=%s size=%d heap=%" PRIu32,
+                 topic, (int)len, kx_system_heap_free());
+
         kx_param_store_set_progress_cb(_on_entities_progress);
         esp_err_t err = kx_param_store_parse(payload, len, control_id);
         kx_param_store_set_progress_cb(NULL);
 
         if (err == ESP_OK) {
             if (kx_param_store_is_ready()) {
-                s_entities_ready = true;
-                kx_param_store_save_nvs();
-                ESP_LOGI(TAG, "all entities ready — s_entities_ready=true");
+                ESP_LOGI(TAG, "all entities ready — saving to NVS");
+                esp_err_t nvs_err = kx_param_store_save_nvs();
+                if (nvs_err == ESP_OK) {
+                    ESP_LOGI(TAG, "NVS save OK");
+                } else {
+                    ESP_LOGW(TAG, "NVS save failed: %s", esp_err_to_name(nvs_err));
+                }
             }
-            _send_ack("entities");
+            _send_ack(config_type);
         } else {
-            _send_error("entities", "PARSE_ERROR", "entities parse failed");
+            _send_error(config_type, "PARSE_ERROR", "entities parse failed");
         }
+        return;
     }
-    return;
-}
 
-    // ── filtro de tamaño para el resto ────────────────────────
+    // ── filtro de tamaño ──────────────────────────────────────
     if (len > KX_PAYLOAD_MAX_BYTES) {
         ESP_LOGW(TAG, "payload too large (%d bytes)", (int)len);
         _send_error(config_type, "PARSE_ERROR", "payload exceeds max size");
@@ -356,41 +448,29 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
     if (!root) {
         const char *ep = cJSON_GetErrorPtr();
         char detail[64];
-        snprintf(detail, sizeof(detail), "parse error near: %.40s",
-                 ep ? ep : "unknown");
+        snprintf(detail, sizeof(detail), "parse error near: %.40s", ep ? ep : "unknown");
         _send_error(config_type, "PARSE_ERROR", detail);
         return;
     }
 
     esp_err_t err = ESP_OK;
 
-    if (strcmp(config_type, "controls_list") == 0) {
-        err = _handle_controls_list(root, payload, len);
-        if (err == ESP_OK) {
-            _send_ack("controls");
-        } else {
-            _send_error("controls", "MISSING_FIELD", "controls array required");
-        }
+    if (strcmp(config_type, "device") == 0) {
+        err = _handle_device(root);
+        if (err != ESP_OK) _send_error("device", "MISSING_FIELD", "uuid required");
+
+    } else if (strcmp(config_type, "controls_list") == 0) {
+        err = _handle_controls_list(root);
+        if (err == ESP_OK) _send_ack("controls");
+        else _send_error("controls", "MISSING_FIELD", "controls array required");
 
     } else if (strcmp(config_type, "control_single") == 0) {
-        err = _handle_control_single(root, _control_id_from_topic(topic), payload, len);
-        if (err == ESP_OK) {
-            _send_ack("controls");
-        } else {
-            _send_error("controls", "PARSE_ERROR", "control_single failed");
-        }
-
-    } else if (strcmp(config_type, "device") == 0) {
-        err = _validate_device_config(root);
-        if (err == ESP_OK) {
-            _send_ack("device");
-        } else {
-            _send_error("device", "MISSING_FIELD", "uuid required");
-        }
+        err = _handle_control_single(root, _control_id_from_topic(topic));
+        if (err == ESP_OK) _send_ack("controls");
+        else _send_error("controls", "PARSE_ERROR", "control_single failed");
 
     } else {
-        ESP_LOGW(TAG, "unhandled config type '%s' for topic: %s",
-                 config_type, topic);
+        ESP_LOGW(TAG, "unhandled config type '%s' topic: %s", config_type, topic);
     }
 
     cJSON_Delete(root);

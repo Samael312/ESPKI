@@ -21,22 +21,24 @@ static const char *TAG = "kx_param_store";
 #define NVS_KEY_UUID     "uuid"
 #define NVS_KEY_FW       "fw"
 #define NVS_KEY_COUNT    "count"
-#define NVS_MAGIC_VALUE  0xE5712A02U   // bumped vs versión array
+#define NVS_MAGIC_VALUE  0xE5712A03U   // bumpeado: nueva estructura con update_ts
 
 // Formato blob NVS para un control:
 //   [ kx_nvs_ctrl_hdr_t ][ kx_param_t × count ]
 typedef struct {
-    int  control_id;
-    int  slave_addr;
-    int  count;
+    int    control_id;
+    int    slave_addr;
+    int    count;
+    double update_ts;
+    char   uuid[64];
 } kx_nvs_ctrl_hdr_t;
 
 // =============================================================
 // Estado global
 // =============================================================
-static kx_ctrl_hash_t        s_hash;           // tabla nivel 1
-static bool                  s_initialized = false;
-static int                   s_expected    = 0;
+static kx_ctrl_hash_t         s_hash;
+static bool                   s_initialized = false;
+static int                    s_expected    = 0;
 static kx_param_progress_cb_t s_progress_cb = NULL;
 
 // =============================================================
@@ -52,11 +54,8 @@ static void *_psram_alloc(size_t size)
 // =============================================================
 // Funciones hash
 // =============================================================
-
-// Hash para control_id (nivel 1)
 static inline uint32_t _ctrl_hash(int control_id)
 {
-    // Multiplicative hash — distribuye bien IDs consecutivos
     uint32_t k = (uint32_t)control_id;
     k = ((k >> 16) ^ k) * 0x45d9f3bU;
     k = ((k >> 16) ^ k) * 0x45d9f3bU;
@@ -64,7 +63,6 @@ static inline uint32_t _ctrl_hash(int control_id)
     return k & (KX_CTRL_HASH_BUCKETS - 1);
 }
 
-// Hash para param_id (nivel 2)
 static inline uint32_t _param_hash(int param_id)
 {
     uint32_t k = (uint32_t)param_id;
@@ -75,22 +73,16 @@ static inline uint32_t _param_hash(int param_id)
 }
 
 // =============================================================
-// Operaciones sobre la hash de controles (nivel 1)
+// Operaciones sobre hash de controles (nivel 1)
 // =============================================================
-
-// Busca o crea un nodo de control.
-// Devuelve puntero al kx_control_t interno, NULL si hay error.
 static kx_control_t *_ctrl_find_or_create(int control_id)
 {
     uint32_t idx = _ctrl_hash(control_id);
     kx_ctrl_node_t *node = s_hash.buckets[idx];
 
-    // buscar en la cadena
     while (node) {
         if (node->ctrl.control_id == control_id) {
-            ESP_LOGW(TAG, "control %d already exists — overwriting params",
-                     control_id);
-            // vaciar la hash de params existente
+            // Ya existe: limpiar params pero conservar metadatos
             for (int b = 0; b < KX_PARAM_HASH_BUCKETS; b++) {
                 kx_param_node_t *pn = node->ctrl.params.buckets[b];
                 while (pn) {
@@ -100,21 +92,18 @@ static kx_control_t *_ctrl_find_or_create(int control_id)
                 }
                 node->ctrl.params.buckets[b] = NULL;
             }
-            node->ctrl.params.count      = 0;
-            node->ctrl.entities_ready    = false;
+            node->ctrl.params.count   = 0;
+            node->ctrl.entities_ready = false;
             return &node->ctrl;
         }
         node = node->next;
     }
 
-    // límite de controles
     if (s_hash.count >= KX_PARAM_MAX_CONTROLS) {
-        ESP_LOGE(TAG, "hash full: %d controls (max %d)",
-                 s_hash.count, KX_PARAM_MAX_CONTROLS);
+        ESP_LOGE(TAG, "hash full: %d controls (max %d)", s_hash.count, KX_PARAM_MAX_CONTROLS);
         return NULL;
     }
 
-    // crear nodo nuevo en PSRAM
     kx_ctrl_node_t *new_node = _psram_alloc(sizeof(kx_ctrl_node_t));
     if (!new_node) {
         ESP_LOGE(TAG, "OOM creating control node");
@@ -123,7 +112,6 @@ static kx_control_t *_ctrl_find_or_create(int control_id)
     memset(new_node, 0, sizeof(kx_ctrl_node_t));
     new_node->ctrl.control_id = control_id;
 
-    // insertar al frente del bucket
     new_node->next      = s_hash.buckets[idx];
     s_hash.buckets[idx] = new_node;
     s_hash.count++;
@@ -133,7 +121,6 @@ static kx_control_t *_ctrl_find_or_create(int control_id)
     return &new_node->ctrl;
 }
 
-// Busca un control (lectura, no crea).
 static kx_control_t *_ctrl_find(int control_id)
 {
     uint32_t idx = _ctrl_hash(control_id);
@@ -146,16 +133,13 @@ static kx_control_t *_ctrl_find(int control_id)
 }
 
 // =============================================================
-// Operaciones sobre la hash de params (nivel 2)
+// Operaciones sobre hash de params (nivel 2)
 // =============================================================
-
-// Inserta o sobreescribe un param en la hash del control.
 static esp_err_t _param_insert(kx_control_t *ctrl, const kx_param_t *param)
 {
     uint32_t idx = _param_hash(param->param_id);
     kx_param_node_t *node = ctrl->params.buckets[idx];
 
-    // buscar si ya existe (sobreescribir)
     while (node) {
         if (node->param.param_id == param->param_id) {
             memcpy(&node->param, param, sizeof(kx_param_t));
@@ -164,27 +148,23 @@ static esp_err_t _param_insert(kx_control_t *ctrl, const kx_param_t *param)
         node = node->next;
     }
 
-    // límite
     if (ctrl->params.count >= KX_PARAM_MAX_PER_CONTROL) {
-        ESP_LOGW(TAG, "ctrl %d: param limit reached (%d)",
-                 ctrl->control_id, KX_PARAM_MAX_PER_CONTROL);
+        ESP_LOGW(TAG, "ctrl %d: param limit reached (%d)", ctrl->control_id, KX_PARAM_MAX_PER_CONTROL);
         return ESP_ERR_NO_MEM;
     }
 
-    // nodo nuevo
     kx_param_node_t *new_node = _psram_alloc(sizeof(kx_param_node_t));
     if (!new_node) {
         ESP_LOGE(TAG, "OOM creating param node");
         return ESP_ERR_NO_MEM;
     }
     memcpy(&new_node->param, param, sizeof(kx_param_t));
-    new_node->next               = ctrl->params.buckets[idx];
-    ctrl->params.buckets[idx]    = new_node;
+    new_node->next            = ctrl->params.buckets[idx];
+    ctrl->params.buckets[idx] = new_node;
     ctrl->params.count++;
     return ESP_OK;
 }
 
-// Busca un param por param_id dentro de un control.
 static const kx_param_t *_param_find(const kx_control_t *ctrl, int param_id)
 {
     uint32_t idx = _param_hash(param_id);
@@ -265,8 +245,7 @@ void kx_param_store_init(void)
 // =============================================================
 // Parseo de entities desde JSON
 // =============================================================
-esp_err_t kx_param_store_parse(const char *payload, size_t len,
-                                int control_id)
+esp_err_t kx_param_store_parse(const char *payload, size_t len, int control_id)
 {
     if (!s_initialized) kx_param_store_init();
 
@@ -289,7 +268,7 @@ esp_err_t kx_param_store_parse(const char *payload, size_t len,
         return ESP_FAIL;
     }
 
-    int total   = cJSON_GetArraySize(regs);
+    int total    = cJSON_GetArraySize(regs);
     int inserted = 0;
     ESP_LOGI(TAG, "control %d: parsing %d params...", control_id, total);
     _print_progress(control_id, 0, total);
@@ -338,125 +317,6 @@ esp_err_t kx_param_store_parse(const char *payload, size_t len,
     return ESP_OK;
 }
 
-// Reutilizable: rellena un kx_param_t desde un objeto cJSON
-static void _parse_param_from_json(cJSON *reg, kx_param_t *p)
-{
-    memset(p, 0, sizeof(*p));
-    p->param_id       = _get_int  (reg, "control_parameter_id",           0);
-    p->reg            = _get_int  (reg, "control_parameter_register",      0);
-    p->function_read  = _get_int  (reg, "control_parameter_function_read", 0);
-    p->function_write = _get_int  (reg, "control_parameter_function_write",0);
-    p->minvalue       = _get_float(reg, "control_parameter_minvalue",   0.0f);
-    p->maxvalue       = _get_float(reg, "control_parameter_maxvalue", 100.0f);
-    p->offset         = _get_float(reg, "control_parameter_offset",     0.0f);
-    p->mask           = _get_int  (reg, "control_parameter_mask",          0);
-    p->view           = _get_int  (reg, "control_parameter_view",          1);
-    p->sampling       = _get_int  (reg, "control_parameter_sampling",     60);
-    _get_str(reg, "control_parameter_name",            p->name,     sizeof(p->name));
-    _get_str(reg, "control_parameter_category_system", p->category, sizeof(p->category));
-    _get_str(reg, "control_parameter_length",          p->length,   sizeof(p->length));
-    cJSON *add = cJSON_GetObjectItem(reg, "control_parameter_addition");
-    p->addition = (add && cJSON_IsNumber(add)) ? (float)add->valuedouble : 0.0f;
-}
-
-// Compara dos params y devuelve bitmask de diferencias
-static kx_param_changed_t _param_diff(const kx_param_t *old,
-                                       const kx_param_t *new)
-{
-    kx_param_changed_t mask = KX_PARAM_CHANGED_NONE;
-    if (old->sampling       != new->sampling)       mask |= KX_PARAM_CHANGED_SAMPLING;
-    if (old->function_read  != new->function_read)  mask |= KX_PARAM_CHANGED_FUNCTION_READ;
-    if (old->function_write != new->function_write) mask |= KX_PARAM_CHANGED_FUNCTION_WRITE;
-    if (old->offset         != new->offset)         mask |= KX_PARAM_CHANGED_OFFSET;
-    if (old->addition       != new->addition)       mask |= KX_PARAM_CHANGED_ADDITION;
-    if (old->view           != new->view)           mask |= KX_PARAM_CHANGED_VIEW;
-    if (old->reg            != new->reg)            mask |= KX_PARAM_CHANGED_REG;
-    if (old->minvalue       != new->minvalue ||
-        old->maxvalue       != new->maxvalue)       mask |= KX_PARAM_CHANGED_MINMAX;
-    return mask;
-}
-
-int kx_param_store_diff_and_update(const char *payload, size_t len,
-                                    int control_id,
-                                    kx_param_diff_cb_t cb,
-                                    void *user_data)
-{
-    if (!s_initialized) kx_param_store_init();
-
-    cJSON *root = cJSON_ParseWithLength(payload, len);
-    if (!root) {
-        ESP_LOGE(TAG, "diff_and_update: JSON parse failed ctrl=%d", control_id);
-        return -1;
-    }
-
-    cJSON *regs = cJSON_GetObjectItem(root, "control_regs");
-    if (!regs || !cJSON_IsArray(regs)) {
-        ESP_LOGW(TAG, "diff_and_update: no control_regs ctrl=%d", control_id);
-        cJSON_Delete(root);
-        return -1;
-    }
-
-    // El control debe existir ya (fue creado en la descarga inicial)
-    kx_control_t *ctrl = _ctrl_find(control_id);
-    if (!ctrl) {
-        // Primera vez que llega este control — comportamiento normal de inserción
-        ctrl = _ctrl_find_or_create(control_id);
-        if (!ctrl) { cJSON_Delete(root); return -1; }
-    }
-
-    int changed_count = 0;
-    int total = cJSON_GetArraySize(regs);
-
-    for (int i = 0; i < total; i++) {
-        cJSON *reg = cJSON_GetArrayItem(regs, i);
-        if (!reg) continue;
-
-        kx_param_t incoming;
-        _parse_param_from_json(reg, &incoming);
-        if (incoming.param_id <= 0) continue;
-
-        const kx_param_t *stored = _param_find(ctrl, incoming.param_id);
-
-        kx_param_changed_t diff_mask;
-
-        if (!stored) {
-            // Param nuevo — insertar y notificar como cambio total
-            diff_mask = (kx_param_changed_t)0xFF;
-            ESP_LOGI(TAG, "diff ctrl=%d param=%d → NEW",
-                     control_id, incoming.param_id);
-        } else {
-            diff_mask = _param_diff(stored, &incoming);
-            if (diff_mask == KX_PARAM_CHANGED_NONE) continue; // sin cambios
-            ESP_LOGI(TAG, "diff ctrl=%d param=%d → changed=0x%02x",
-                     control_id, incoming.param_id, (unsigned)diff_mask);
-        }
-
-        // Actualizar hash con los valores nuevos
-        _param_insert(ctrl, &incoming);
-        changed_count++;
-
-        // Notificar al caller
-        if (cb) {
-            kx_param_diff_t d = {
-                .param_id  = incoming.param_id,
-                .changed   = diff_mask,
-                .new_param = incoming,
-            };
-            cb(control_id, &d, user_data);
-        }
-    }
-
-    cJSON_Delete(root);
-
-    if (changed_count > 0) {
-        ESP_LOGI(TAG, "diff ctrl=%d: %d params updated", control_id, changed_count);
-        // Persistir los cambios en NVS
-        kx_param_store_save_nvs();
-    }
-
-    return changed_count;
-}
-
 // =============================================================
 // Consultas
 // =============================================================
@@ -483,7 +343,6 @@ int kx_param_store_count(void)
 void kx_param_store_foreach(kx_param_iter_cb_t cb, void *user_data)
 {
     if (!cb) return;
-
     for (int ci = 0; ci < KX_CTRL_HASH_BUCKETS; ci++) {
         kx_ctrl_node_t *cn = s_hash.buckets[ci];
         while (cn) {
@@ -529,13 +388,62 @@ void kx_param_store_set_slave_addr(int control_id, int slave_addr)
 {
     if (!s_initialized) kx_param_store_init();
     kx_control_t *ctrl = _ctrl_find(control_id);
-    if (!ctrl) {
-        ctrl = _ctrl_find_or_create(control_id);
-    }
+    if (!ctrl) ctrl = _ctrl_find_or_create(control_id);
     if (ctrl) {
         ctrl->slave_addr = slave_addr;
         ESP_LOGI(TAG, "slave_addr set: ctrl=%d → %d", control_id, slave_addr);
     }
+}
+
+void kx_param_store_set_uuid(int control_id, const char *uuid)
+{
+    if (!s_initialized) kx_param_store_init();
+    kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) ctrl = _ctrl_find_or_create(control_id);
+    if (ctrl && uuid) {
+        snprintf(ctrl->uuid, sizeof(ctrl->uuid), "%s", uuid);
+    }
+}
+
+// =============================================================
+// update_ts por control
+// =============================================================
+double kx_param_store_get_update_ts(int control_id)
+{
+    kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) return 0.0;
+    return ctrl->update_ts;
+}
+
+void kx_param_store_set_update_ts(int control_id, double ts)
+{
+    if (!s_initialized) kx_param_store_init();
+    kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) ctrl = _ctrl_find_or_create(control_id);
+    if (ctrl) {
+        ctrl->update_ts = ts;
+        ESP_LOGI(TAG, "update_ts set: ctrl=%d → %.3f", control_id, ts);
+    }
+}
+
+void kx_param_store_clear_entities(int control_id)
+{
+    kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) return;
+
+    for (int b = 0; b < KX_PARAM_HASH_BUCKETS; b++) {
+        kx_param_node_t *pn = ctrl->params.buckets[b];
+        while (pn) {
+            kx_param_node_t *tmp = pn->next;
+            free(pn);
+            pn = tmp;
+        }
+        ctrl->params.buckets[b] = NULL;
+    }
+    ctrl->params.count   = 0;
+    ctrl->entities_ready = false;
+
+    ESP_LOGI(TAG, "entities cleared for ctrl=%d (ts=%.3f)", control_id, ctrl->update_ts);
 }
 
 // =============================================================
@@ -548,9 +456,10 @@ void kx_param_store_set_progress_cb(kx_param_progress_cb_t cb)
 
 // =============================================================
 // Persistencia NVS
-// Formato: por cada control se guarda un blob con cabecera +
-// array plano de kx_param_t — igual que antes pero adaptado
-// a que ahora el store es una hash.
+// La caché almacena controles con update_ts, slave_addr, uuid y
+// sus entities. La validación ya no depende de FW version sino
+// de magic + device uuid. La decisión de refrescar entities se
+// toma en kx_config_handler comparando update_ts.
 // =============================================================
 bool kx_param_store_nvs_valid(void)
 {
@@ -561,19 +470,14 @@ bool kx_param_store_nvs_valid(void)
     nvs_get_u32(h, NVS_KEY_MAGIC, &magic);
 
     char uuid[64] = "";
-    char fw  [32] = "";
-    size_t len;
-
-    len = sizeof(uuid); nvs_get_str(h, NVS_KEY_UUID, uuid, &len);
-    len = sizeof(fw);   nvs_get_str(h, NVS_KEY_FW,   fw,   &len);
+    size_t len = sizeof(uuid);
+    nvs_get_str(h, NVS_KEY_UUID, uuid, &len);
     nvs_close(h);
 
     bool ok = (magic == NVS_MAGIC_VALUE)
-           && (strcmp(uuid, KX_DEVICE_UUID) == 0)
-           && (strcmp(fw,   KX_FW_VERSION)  == 0);
+           && (strcmp(uuid, KX_DEVICE_UUID) == 0);
 
-    ESP_LOGI(TAG, "nvs_valid=%d (magic=%08lx uuid=%s fw=%s)",
-             ok, (unsigned long)magic, uuid, fw);
+    ESP_LOGI(TAG, "nvs_valid=%d (magic=%08lx uuid=%s)", ok, (unsigned long)magic, uuid);
     return ok;
 }
 
@@ -590,7 +494,6 @@ esp_err_t kx_param_store_save_nvs(void)
 
     nvs_set_u32(h, NVS_KEY_MAGIC, NVS_MAGIC_VALUE);
     nvs_set_str(h, NVS_KEY_UUID,  KX_DEVICE_UUID);
-    nvs_set_str(h, NVS_KEY_FW,    KX_FW_VERSION);
     nvs_set_u8 (h, NVS_KEY_COUNT, (uint8_t)s_hash.count);
 
     int ctrl_idx = 0;
@@ -600,13 +503,11 @@ esp_err_t kx_param_store_save_nvs(void)
         while (cn) {
             kx_control_t *ctrl = &cn->ctrl;
 
-            // construir blob: cabecera + params planos
             size_t blob_size = sizeof(kx_nvs_ctrl_hdr_t)
                              + (size_t)ctrl->params.count * sizeof(kx_param_t);
             uint8_t *blob = malloc(blob_size);
             if (!blob) {
-                ESP_LOGE(TAG, "OOM building NVS blob for ctrl=%d",
-                         ctrl->control_id);
+                ESP_LOGE(TAG, "OOM building NVS blob for ctrl=%d", ctrl->control_id);
                 cn = cn->next;
                 continue;
             }
@@ -615,7 +516,9 @@ esp_err_t kx_param_store_save_nvs(void)
                 .control_id = ctrl->control_id,
                 .slave_addr = ctrl->slave_addr,
                 .count      = ctrl->params.count,
+                .update_ts  = ctrl->update_ts,
             };
+            snprintf(hdr.uuid, sizeof(hdr.uuid), "%s", ctrl->uuid);
             memcpy(blob, &hdr, sizeof(hdr));
 
             uint8_t *ptr = blob + sizeof(hdr);
@@ -634,8 +537,10 @@ esp_err_t kx_param_store_save_nvs(void)
             free(blob);
 
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "nvs write %s failed: %s",
-                         key, esp_err_to_name(err));
+                ESP_LOGW(TAG, "nvs write %s failed: %s", key, esp_err_to_name(err));
+            } else {
+                ESP_LOGI(TAG, "nvs: saved ctrl=%d uuid=%s ts=%.3f params=%d",
+                         ctrl->control_id, ctrl->uuid, ctrl->update_ts, ctrl->params.count);
             }
 
             cn = cn->next;
@@ -646,8 +551,7 @@ esp_err_t kx_param_store_save_nvs(void)
     nvs_close(h);
 
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "nvs: saved %d controls (uuid=%s fw=%s)",
-                 s_hash.count, KX_DEVICE_UUID, KX_FW_VERSION);
+        ESP_LOGI(TAG, "nvs: saved %d controls (uuid=%s)", s_hash.count, KX_DEVICE_UUID);
     }
     return err;
 }
@@ -700,21 +604,22 @@ esp_err_t kx_param_store_load_nvs(void)
             continue;
         }
         ctrl->slave_addr = hdr.slave_addr;
+        ctrl->update_ts  = hdr.update_ts;
+        snprintf(ctrl->uuid, sizeof(ctrl->uuid), "%s", hdr.uuid);
 
-        // insertar params desde el blob plano
-        kx_param_t *params = (kx_param_t *)(blob + sizeof(hdr));
-        int params_in_blob = (int)((blob_size - sizeof(hdr)) / sizeof(kx_param_t));
-        int loaded = 0;
+        kx_param_t *params     = (kx_param_t *)(blob + sizeof(hdr));
+        int         params_in_blob = (int)((blob_size - sizeof(hdr)) / sizeof(kx_param_t));
+        int         loaded     = 0;
 
         for (int p = 0; p < params_in_blob && p < hdr.count; p++) {
             if (_param_insert(ctrl, &params[p]) == ESP_OK) loaded++;
         }
 
-        ctrl->entities_ready = true;
+        ctrl->entities_ready = (loaded > 0);
         free(blob);
 
-        ESP_LOGI(TAG, "nvs: ctrl=%d slave=%d params=%d",
-                 hdr.control_id, hdr.slave_addr, loaded);
+        ESP_LOGI(TAG, "nvs: ctrl=%d uuid=%s slave=%d ts=%.3f params=%d",
+                 hdr.control_id, hdr.uuid, hdr.slave_addr, hdr.update_ts, loaded);
     }
 
     nvs_close(h);

@@ -39,7 +39,7 @@
 #define KX_TASK_PRIO_SUPERVISION 6
 
 // ── Payload ───────────────────────────────────────────────────
-#define KX_PAYLOAD_MAX_BYTES     262144
+#define KX_PAYLOAD_MAX_BYTES     40960
 #define MQTT_MAX_TOPIC_SIZE      1024
 
 // ── Identidad ─────────────────────────────────────────────────
@@ -58,13 +58,17 @@
 #define KX_TOPIC_CONFIG_ACK   KX_TOPIC_PREFIX "/" KX_DEVICE_UUID "/config/ack"
 #define KX_TOPIC_CONFIG_ERROR KX_TOPIC_PREFIX "/" KX_DEVICE_UUID "/config/error"
 
-#define KX_MODBUS_UART_NUM UART_NUM_1 // o el puerto que uses
+// Discovery activo (dispositivo → bridge)
+// Topic: {uuid}/controls  con payload {"_type":"controls-discovery","timestamp":...}
+// El bridge escucha este topic y responde publicando controls.json
+// en +/{uuid}/controls (recibido por el dispositivo vía suscripción)
+#define KX_TOPIC_CONTROLS_DISCOVERY     KX_DEVICE_UUID "/controls"
+
+// ── Modbus ────────────────────────────────────────────────────
+#define KX_MODBUS_UART_NUM UART_NUM_1
 #define KX_MODBUS_PIN_TX   GPIO_NUM_4
 #define KX_MODBUS_PIN_RX   GPIO_NUM_36
 #define KX_MODBUS_BAUD     9600
 
-
-
 // ── Firmware version ──────────────────────────────────────────
 #define KX_FW_VERSION  "0.2.0"
-

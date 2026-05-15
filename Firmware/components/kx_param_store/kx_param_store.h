@@ -17,16 +17,20 @@
 //
 //   Toda la memoria se asigna en PSRAM (heap_caps_malloc) con
 //   fallback a RAM interna si PSRAM no está disponible.
+//
+//   Cache NVS basado en update_ts por control:
+//     - Se guarda update_ts junto a cada control
+//     - Al recibir controls.json se compara update_ts entrante
+//       con el almacenado; si el entrante es mayor se borran las
+//       entities del control y se relanza entities-discovery
 // =============================================================
 
 // ── Límites y dimensiones de las tablas hash ──────────────────
-#define KX_PARAM_MAX_PER_CONTROL   500   // máx params por control
-#define KX_PARAM_MAX_CONTROLS       16   // máx controles
+#define KX_PARAM_MAX_PER_CONTROL   500
+#define KX_PARAM_MAX_CONTROLS       16
 
-// Tamaño de las tablas hash — potencias de 2 para que el módulo
-// sea un AND en lugar de una división.
-#define KX_CTRL_HASH_BUCKETS        16   // ≥ KX_PARAM_MAX_CONTROLS
-#define KX_PARAM_HASH_BUCKETS       64   // ≥ params esperados / LF
+#define KX_CTRL_HASH_BUCKETS        16
+#define KX_PARAM_HASH_BUCKETS       64
 
 // ── Longitudes de strings ─────────────────────────────────────
 #define KX_PARAM_NAME_LEN           64
@@ -53,129 +57,66 @@ typedef struct {
     int     sampling;
 } kx_param_t;
 
-// Campos que pueden cambiar en una actualización
-typedef enum {
-    KX_PARAM_CHANGED_NONE          = 0,
-    KX_PARAM_CHANGED_SAMPLING      = (1 << 0),
-    KX_PARAM_CHANGED_FUNCTION_READ = (1 << 1),
-    KX_PARAM_CHANGED_FUNCTION_WRITE= (1 << 2),
-    KX_PARAM_CHANGED_OFFSET        = (1 << 3),
-    KX_PARAM_CHANGED_ADDITION      = (1 << 4),
-    KX_PARAM_CHANGED_MINMAX        = (1 << 5),
-    KX_PARAM_CHANGED_VIEW          = (1 << 6),
-    KX_PARAM_CHANGED_REG           = (1 << 7),
-} kx_param_changed_t;
-
 // ── Nodo de la lista de params (hash nivel 2) ─────────────────
 typedef struct kx_param_node {
-    kx_param_t          param;
+    kx_param_t           param;
     struct kx_param_node *next;
 } kx_param_node_t;
 
 // ── Tabla hash de params (nivel 2) ───────────────────────────
 typedef struct {
     kx_param_node_t *buckets[KX_PARAM_HASH_BUCKETS];
-    int              count;   // número de params insertados
+    int              count;
 } kx_param_hash_t;
 
-typedef struct {
-    int                param_id;
-    kx_param_changed_t changed;   // bitmask de campos que difieren
-    kx_param_t         new_param; // valores nuevos ya listos para insertar
-} kx_param_diff_t;
-
 // =============================================================
-// Control — contiene su propia hash de params
+// Control — contiene su propia hash de params + update_ts
 // =============================================================
 typedef struct {
     int              control_id;
     int              slave_addr;
-    kx_param_hash_t  params;          // hash nivel 2
+    char             uuid[64];
+    double           update_ts;      // timestamp del controls.json
+    kx_param_hash_t  params;
     bool             entities_ready;
 } kx_control_t;
 
 // ── Nodo de la lista de controles (hash nivel 1) ──────────────
 typedef struct kx_ctrl_node {
-    kx_control_t      ctrl;
+    kx_control_t         ctrl;
     struct kx_ctrl_node *next;
 } kx_ctrl_node_t;
 
 // ── Tabla hash de controles (nivel 1) ────────────────────────
 typedef struct {
     kx_ctrl_node_t *buckets[KX_CTRL_HASH_BUCKETS];
-    int             count;   // número de controles insertados
+    int             count;
 } kx_ctrl_hash_t;
 
-// Callback que se invoca por cada param que cambió
-// user_data lo pasa el caller (p.ej. control_id empaquetado)
-typedef void (*kx_param_diff_cb_t)(int control_id,
-                                    const kx_param_diff_t *diff,
-                                    void *user_data);
 // =============================================================
 // Tipos de callback
 // =============================================================
-
-// Progreso de parseo de entities para un control
-//   control_id : control que se está recibiendo
-//   received   : params procesados hasta ahora
-//   total      : total de params en este control
-typedef void (*kx_param_progress_cb_t)(int control_id,
-                                        int received,
-                                        int total);
-
-// Iterador sobre todos los params de todos los controles
-typedef void (*kx_param_iter_cb_t)(int                control_id,
-                                    const kx_param_t  *param,
-                                    void              *user_data);
+typedef void (*kx_param_progress_cb_t)(int control_id, int received, int total);
+typedef void (*kx_param_iter_cb_t)(int control_id, const kx_param_t *param, void *user_data);
 
 // =============================================================
-// API pública
+// API pública — ciclo de vida
 // =============================================================
+void      kx_param_store_init(void);
+esp_err_t kx_param_store_parse(const char *payload, size_t len, int control_id);
 
-// ── Ciclo de vida ─────────────────────────────────────────────
-
-// Inicializa la hash (asigna memoria en PSRAM).
-// Idempotente: llamadas repetidas no hacen nada.
-void kx_param_store_init(void);
-
-// Parsea un JSON de entities y lo inserta en la hash.
-// control_id se obtiene del topic MQTT antes de llamar.
-esp_err_t kx_param_store_parse(const char *payload, size_t len,
-                                int control_id);
-
-// Parsea el payload entrante, compara contra la hash y:
-//   - Si el param no existía → lo inserta y llama cb con CHANGED_ALL
-//   - Si existía y cambió algo → actualiza y llama cb con el bitmask
-//   - Si no cambió → no llama cb
-// Devuelve número de params que cambiaron, o -1 si error de parseo.
-int kx_param_store_diff_and_update(const char *payload, size_t len,
-                                    int control_id,
-                                    kx_param_diff_cb_t cb,
-                                    void *user_data);
 // ── Consulta — nivel control ──────────────────────────────────
-
-// Devuelve el control (const) o NULL si no existe.
 const kx_control_t *kx_param_store_get_ctrl(int control_id);
-
-// Número de controles en la hash.
-int kx_param_store_count(void);
+int                 kx_param_store_count(void);
 
 // ── Consulta — nivel param ────────────────────────────────────
-
-// Devuelve el param (const) dado control_id + param_id, o NULL.
 const kx_param_t *kx_param_store_get_param(int control_id, int param_id);
 
 // ── Iteración ─────────────────────────────────────────────────
-
-// Recorre todos los params de todos los controles.
 void kx_param_store_foreach(kx_param_iter_cb_t cb, void *user_data);
 
 // ── Control de completitud ────────────────────────────────────
-
-// Fija cuántos controles se esperan (para saber cuándo está listo).
 void kx_param_store_set_expected(int count);
-
-// True cuando todos los controles esperados tienen entities_ready.
 bool kx_param_store_is_ready(void);
 
 // ── Progreso visual ───────────────────────────────────────────
@@ -183,22 +124,38 @@ void kx_param_store_set_progress_cb(kx_param_progress_cb_t cb);
 
 // ── Configuración adicional por control ──────────────────────
 void kx_param_store_set_slave_addr(int control_id, int slave_addr);
+void kx_param_store_set_uuid(int control_id, const char *uuid);
+
+// ── update_ts por control ─────────────────────────────────────
+
+// Devuelve el update_ts almacenado para un control (0.0 si no existe).
+double kx_param_store_get_update_ts(int control_id);
+
+// Actualiza el update_ts de un control ya existente (sin tocar entities).
+void kx_param_store_set_update_ts(int control_id, double ts);
+
+// Borra todas las entities de un control y marca entities_ready=false.
+// Llamar antes de relanzar entities-discovery cuando el ts es mayor.
+void kx_param_store_clear_entities(int control_id);
 
 // ── Persistencia NVS ─────────────────────────────────────────
+// La caché NVS guarda controles (slave_addr, uuid, update_ts).
+// Las entities se guardan en NVS junto al control.
+// Al arranque se valida magic+uuid+fw; si es válido se restaura
+// el estado completo. La decisión de refrescar entities se toma
+// comparando update_ts en kx_config_handler.
 esp_err_t kx_param_store_save_nvs(void);
 esp_err_t kx_param_store_load_nvs(void);
 esp_err_t kx_param_store_clear_nvs(void);
 bool      kx_param_store_nvs_valid(void);
 
 // ── Compatibilidad con código existente ──────────────────────
-// kx_modbus_master.c y kx_dummy_protocol.c usan kx_control_params_t.
-// Definimos un alias para no tocar esos archivos ahora.
 typedef kx_control_t kx_control_params_t;
 
-// Alias de función para el código que llama a kx_param_store_get()
-// con el nombre antiguo.
-static inline const kx_control_params_t *
-kx_param_store_get(int control_id)
+static inline const kx_control_params_t *kx_param_store_get(int control_id)
 {
     return kx_param_store_get_ctrl(control_id);
 }
+
+// Alias para error pub
+void kx_param_pub_error(int control_id, int param_id, const char *msg);
