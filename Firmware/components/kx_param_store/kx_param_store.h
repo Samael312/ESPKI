@@ -49,11 +49,7 @@ typedef struct {
     int     mask;
     int     view;
     int     sampling;
-
-    // ── Control de escrituras entrantes (topic {id}set) ───────
-    // Almacena el ts del último mensaje set procesado.
-    // Un mensaje entrante solo se ejecuta si su ts > ts_set.
-    double  ts_set;   // 0.0 = nunca procesado
+    double  ts_set;
 } kx_param_t;
 
 // ── Nodo de la lista de params (hash nivel 2) ─────────────────
@@ -115,7 +111,11 @@ const kx_param_t *kx_param_store_get_param(int control_id, int param_id);
 void kx_param_store_foreach(kx_param_iter_cb_t cb, void *user_data);
 
 // ── Control de completitud ────────────────────────────────────
+
+// Fija cuántos controles se esperan (para saber cuándo está listo).
 void kx_param_store_set_expected(int count);
+
+// True cuando todos los controles esperados tienen entities_ready.
 bool kx_param_store_is_ready(void);
 
 // ── Progreso visual ───────────────────────────────────────────
@@ -130,14 +130,15 @@ double kx_param_store_get_update_ts(int control_id);
 void   kx_param_store_set_update_ts(int control_id, double ts);
 void   kx_param_store_clear_entities(int control_id);
 
-// ── ts_set por param ──────────────────────────────────────────
-//
-// Actualiza el campo ts_set de un param concreto dentro de un
-// control. Retorna ESP_ERR_NOT_FOUND si el param no existe.
-// El campo ts_set NO se persiste en NVS (es estado volátil de
-// escritura en caliente; al reiniciar se acepta siempre el primero).
-esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts);
+void   kx_param_store_set_update_ts(int control_id, double ts);
+void   kx_param_store_clear_entities(int control_id);
 
+// Borra todas las entities de un control y marca entities_ready=false.
+// Llamar antes de relanzar entities-discovery cuando el ts es mayor.
+void kx_param_store_clear_entities(int control_id);
+
+
+esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts);
 // ── Persistencia NVS ─────────────────────────────────────────
 esp_err_t kx_param_store_save_nvs(void);
 esp_err_t kx_param_store_load_nvs(void);

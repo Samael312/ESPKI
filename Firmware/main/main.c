@@ -101,19 +101,12 @@ static esp_err_t _wifi_init_sta(void)
     return ESP_FAIL;
 }
 
-// ── Helpers de clasificación de topic ─────────────────────────
-
-// Devuelve true si el topic pertenece al espacio quiiot/{uuid}/entities/*
-// Es decir, empieza por "quiiot/" (no por "+/").
 static inline bool _is_quiiot_entities_topic(const char *topic)
 {
     return (strncmp(topic, "quiiot/", 7) == 0 &&
             strstr(topic, "/entities/") != NULL);
 }
 
-// Devuelve true si el último segmento del topic termina en "set".
-// Ejemplos que pasan: "...entities/7748348set"
-// Ejemplos que NO pasan: "...entities/get", "...entities/7748348"
 static bool _topic_last_segment_ends_with_set(const char *topic)
 {
     const char *last_slash = strrchr(topic, '/');
@@ -159,7 +152,6 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
              topic, len, kx_system_heap_free());
     ESP_LOGD(TAG, "payload: %.*s", (int)len, payload);
 
-    // ── Bloque 1-3: topics quiiot/{uuid}/entities/* ───────────
     if (_is_quiiot_entities_topic(topic)) {
 
         if (_topic_last_segment_ends_with_set(topic)) {
@@ -172,7 +164,6 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
         return;
     }
 
-    // ── Bloque 4: configuración de controles ──────────────────
     if (strstr(topic, "/controls")) {
         kx_config_handle(topic, payload, len);
         return;

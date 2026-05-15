@@ -4,6 +4,11 @@
 #include "kx_param_store.h"
 #include "kx_modbus_master.h"
 #include <sys/time.h>
+#include "kx_param_store.h"
+#include "kx_modbus_master.h"
+#include "cJSON.h"
+#include <string.h>
+#include <stdlib.h>
 #include "../../main/kx_config.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -90,8 +95,11 @@ void kx_param_pub_report(int control_id, int param_id, float value)
     kx_mqtt_publish(topic, payload, 0, 0);
 }
 
-void kx_param_pub_error_modbus(int control_id, int param_id,
-                                uint16_t reg, const char *msg)
+/**
+ * Publica un error genérico.
+ * Topic: {uuid}/quiiot/entities/{id}/status
+ */
+void kx_param_pub_error(int control_id, int param_id, const char *msg)
 {
     char topic[128];
     char payload[256];
@@ -270,9 +278,9 @@ void kx_param_handle_set(const char *topic, const char *payload, size_t len)
     }
 }
 
-// ─────────────────────────────────────────────────────────────
-// Tarea de telemetría periódica
-// ─────────────────────────────────────────────────────────────
+
+
+// --- Tarea y Control ---
 
 static void _telemetry_task(void *arg)
 {

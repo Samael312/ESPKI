@@ -226,9 +226,9 @@ static void _publish_value(int control_id, const kx_param_t *param, float value)
         kx_param_pub_status(control_id, param->param_id, value);
         
     } else {
-        ESP_LOGW(TAG, "param_id=%d no tiene función de lectura definida, no se publica",
-                 param->param_id);
-}
+        ESP_LOGW(TAG, "param ctrl=%d param=%d no tiene función de lectura definida",
+                 control_id, param->param_id);
+    }
 }
 
 static void _publish_error(int control_id, const kx_param_t *param, const char *reason)

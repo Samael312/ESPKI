@@ -246,8 +246,8 @@ static void _subscribe_all(void)
     ESP_LOGI(TAG, "subscribed: +/%s/controls/+/entities", KX_DEVICE_UUID);
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    esp_mqtt_client_subscribe(s_client,"+/" KX_DEVICE_UUID "/entities/+",0);
-    ESP_LOGI(TAG, "subscribed: +/%s/entities/+", KX_DEVICE_UUID);
+    esp_mqtt_client_subscribe(s_client, KX_TOPIC_PREFIX "/" KX_DEVICE_UUID "/entities/+", 0);
+    ESP_LOGI(TAG, "subscribed: %s/%s/entities/+", KX_TOPIC_PREFIX, KX_DEVICE_UUID);
     vTaskDelay(pdMS_TO_TICKS(200));
 }
 

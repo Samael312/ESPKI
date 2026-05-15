@@ -454,17 +454,6 @@ void kx_param_store_set_progress_cb(kx_param_progress_cb_t cb)
     s_progress_cb = cb;
 }
 
-
-// ── ts_set por param ──────────────────────────────────────────
-//
-// Busca el param_id dentro del control_id y actualiza ts_set.
-// El campo ts_set vive en el nodo del hash (memoria mutable)
-// aunque kx_param_store_get_param devuelva un puntero const;
-// accedemos al nodo directamente para poder escribirlo.
-//
-// NO se persiste en NVS: al reiniciar, el primer mensaje set
-// cuyo ts sea > 0 siempre se ejecutará (ts_set parte de 0.0).
-// =============================================================
 esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts)
 {
     // Necesitamos acceso mutable al nodo; reutilizamos el hash privado.
