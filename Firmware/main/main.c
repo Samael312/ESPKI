@@ -123,27 +123,32 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
     ESP_LOGW(TAG, "unhandled topic: %s", topic);
 }
 
-// ── Verificación de entities en NVS ──────────────────────────
-static bool _try_load_entities_from_nvs(void)
+// ── Intentar cargar controles desde NVS ──────────────────────
+// Restaura el store completo (metadatos + entities + update_ts).
+// Si la caché es válida, el Modbus puede arrancar directamente.
+// La comparación de update_ts ocurrirá cuando llegue el
+// controls.json tras el controls, y el handler
+// descartará la caché sólo si hay cambios.
+static bool _try_load_from_nvs(void)
 {
     kx_param_store_init();
 
     if (!kx_param_store_nvs_valid()) {
-        ESP_LOGI(TAG, "entities cache: miss (uuid/fw mismatch or empty)");
+        ESP_LOGI(TAG, "NVS cache: miss (magic/uuid mismatch or empty)");
         return false;
     }
 
-    ESP_LOGI(TAG, "entities cache: HIT — loading from NVS...");
+    ESP_LOGI(TAG, "NVS cache: HIT — loading controls + entities...");
     esp_err_t err = kx_param_store_load_nvs();
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "NVS load failed (%s), will re-download",
+        ESP_LOGW(TAG, "NVS load failed (%s), will download via MQTT",
                  esp_err_to_name(err));
         kx_param_store_clear_nvs();
         return false;
     }
 
     int count = kx_param_store_count();
-    ESP_LOGI(TAG, "entities cache: loaded %d controls from NVS", count);
+    ESP_LOGI(TAG, "NVS cache: loaded %d controls", count);
     kx_param_store_set_expected(count);
     return true;
 }
@@ -154,8 +159,8 @@ static void _print_boot_banner(bool from_cache)
     ESP_LOGI(TAG, "╔══════════════════════════════════════╗");
     ESP_LOGI(TAG, "║  Kiconex Box Lite  FW %-15s ║", KX_FW_VERSION);
     ESP_LOGI(TAG, "║  UUID: %.8s...                  ║", KX_DEVICE_UUID);
-    ESP_LOGI(TAG, "║  Entities: %-26s ║",
-             from_cache ? "loaded from NVS cache" : "will download via MQTT");
+    ESP_LOGI(TAG, "║  Cache: %-28s ║",
+             from_cache ? "controls+entities from NVS" : "will download via MQTT");
     ESP_LOGI(TAG, "║  Protocol: Modbus RTU               ║");
     ESP_LOGI(TAG, "╚══════════════════════════════════════╝");
 }
@@ -163,12 +168,15 @@ static void _print_boot_banner(bool from_cache)
 // ── app_main ──────────────────────────────────────────────────
 void app_main(void)
 {
-    // 1. sistema base: NVS, device_id, boot count
+    // 1. Sistema base: NVS, device_id, boot count
     ESP_ERROR_CHECK(kx_system_init());
 
-    // 2. Verificar caché de entities en NVS
-    bool entities_from_cache = _try_load_entities_from_nvs();
-    _print_boot_banner(entities_from_cache);
+    // 2. Intentar cargar controles + entities desde NVS
+    //    Si hay caché válida, el Modbus arrancará sin esperar MQTT.
+    //    Cuando llegue el controls.json (tras controls)
+    //    el handler comparará update_ts y actualizará lo que haya cambiado.
+    bool from_cache = _try_load_from_nvs();
+    _print_boot_banner(from_cache);
 
     // 3. WiFi — bloqueante hasta IP o timeout
     if (_wifi_init_sta() != ESP_OK) {
@@ -180,30 +188,29 @@ void app_main(void)
     // 4. NTP
     _ntp_init();
 
-    // 5. MQTT
+    // 5. MQTT — al conectarse publicará device-status online
+    //    y el bridge responderá con device.json → controls
+    //    → controls.json → entities-discovery (si ts mayor) → entities
     ESP_ERROR_CHECK(kx_mqtt_start(_on_mqtt_message));
 
-    // 6. Informar al config handler si las entities ya están listas
-    if (entities_from_cache) {
-        kx_config_set_entities_ready(true);
-    }
-
-    // 7. Telemetría (log de estado periódico)
+    // 6. Telemetría periódica
     ESP_ERROR_CHECK(kx_telemetry_start());
 
-    // 8. Modbus RTU maestro (Fase 2)
+    // 7. Modbus RTU maestro
+    //    Si hay caché válida arranca de inmediato (kx_param_store_is_ready()
+    //    ya es true). Si no, esperará en el bucle interno hasta que
+    //    entities-discovery complete.
     ESP_ERROR_CHECK(kx_modbus_master_start());
-    
 
-    ESP_LOGI(TAG, "init done — device_id=%s fw=%s cache=%s proto=modbus",
+    ESP_LOGI(TAG, "init done — device_id=%s fw=%s cache=%s",
              kx_system_device_id(), KX_FW_VERSION,
-             entities_from_cache ? "yes" : "no");
+             from_cache ? "yes" : "no");
 
     while (1) {
-        ESP_LOGI(TAG, "heap=%lu mqtt=%s modbus=%s entities=%d",
+        ESP_LOGI(TAG, "heap=%lu mqtt=%s modbus=%s controls=%d",
                  (unsigned long)kx_system_heap_free(),
-                 kx_mqtt_is_connected()      ? "connected"  : "disconnected",
-                 kx_modbus_master_is_running() ? "running" : "stopped",
+                 kx_mqtt_is_connected()        ? "connected"    : "disconnected",
+                 kx_modbus_master_is_running()  ? "running"      : "stopped",
                  kx_param_store_count());
         vTaskDelay(pdMS_TO_TICKS(10000));
     }

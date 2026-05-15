@@ -10,6 +10,8 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
@@ -18,7 +20,7 @@
 static const char *TAG = "kx_modbus";
 
 // =============================================================
-// Parámetros UART/RS-485 — definir en kx_config.h si no existen
+// Parámetros UART/RS-485
 // =============================================================
 #ifndef KX_MODBUS_UART_NUM
 #define KX_MODBUS_UART_NUM   UART_NUM_1
@@ -36,13 +38,11 @@ static const char *TAG = "kx_modbus";
 #define KX_MODBUS_RTS_PIN    -1
 #endif
 
-// Tiempos
 #define MODBUS_RESPONSE_TIMEOUT_MS   100
 #define MODBUS_INTER_FRAME_MS         20
 #define MODBUS_INTER_PARAM_MS         10
 #define MODBUS_RETRY_COUNT             2
 
-// Funciones Modbus soportadas
 #define MB_FC_READ_COILS           0x01
 #define MB_FC_READ_DISCRETE        0x02
 #define MB_FC_READ_HOLDING_REGS    0x03
@@ -51,8 +51,27 @@ static const char *TAG = "kx_modbus";
 #define MB_FC_WRITE_SINGLE_REG     0x06
 #define MB_FC_WRITE_MULTIPLE_REGS  0x10
 
-static volatile bool s_running = false;
-static TaskHandle_t  s_task    = NULL;
+// =============================================================
+// Sincronización
+//
+// s_poll_eg — POLL_ALLOWED_BIT:
+//   seteado   → el ciclo puede arrancar
+//   limpiado  → el ciclo no arrancará en la siguiente iteración
+//
+// s_foreach_mutex:
+//   El task lo toma ANTES del foreach y lo suelta AL TERMINAR.
+//   kx_modbus_pause() limpia POLL_ALLOWED_BIT y luego toma el
+//   mutex → espera a que el foreach en curso termine antes de
+//   devolver el control. kx_param_store_clear_entities() se
+//   llama únicamente después de que pause() devuelve, por lo
+//   que nunca toca nodos que el iterador aún está usando.
+// =============================================================
+#define POLL_ALLOWED_BIT   BIT0
+
+static EventGroupHandle_t  s_poll_eg       = NULL;
+static SemaphoreHandle_t   s_foreach_mutex = NULL;
+static volatile bool       s_running       = false;
+static TaskHandle_t        s_task          = NULL;
 
 // ── CRC16 Modbus ──────────────────────────────────────────────
 static uint16_t _crc16(const uint8_t *buf, size_t len)
@@ -72,12 +91,12 @@ static uint16_t _crc16(const uint8_t *buf, size_t len)
 static esp_err_t _uart_init(void)
 {
     uart_config_t cfg = {
-        .baud_rate           = KX_MODBUS_BAUD,
-        .data_bits           = UART_DATA_8_BITS, 
-        .parity              = UART_PARITY_DISABLE,
-        .stop_bits           = UART_STOP_BITS_1,
-        .flow_ctrl           = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk          = UART_SCLK_DEFAULT,
+        .baud_rate  = KX_MODBUS_BAUD,
+        .data_bits  = UART_DATA_8_BITS,
+        .parity     = UART_PARITY_DISABLE,
+        .stop_bits  = UART_STOP_BITS_1,
+        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
     };
 
     esp_err_t err;
@@ -89,10 +108,7 @@ static esp_err_t _uart_init(void)
                        KX_MODBUS_RTS_PIN, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) return err;
 
-    err = uart_driver_install(KX_MODBUS_UART_NUM,
-                              256,   // rx buf
-                              256,   // tx buf
-                              0, NULL, 0);
+    err = uart_driver_install(KX_MODBUS_UART_NUM, 256, 256, 0, NULL, 0);
     if (err != ESP_OK) return err;
 
     if (KX_MODBUS_RTS_PIN != UART_PIN_NO_CHANGE) {
@@ -108,14 +124,9 @@ static esp_err_t _uart_init(void)
     return ESP_OK;
 }
 
-// ── Enviar trama y recibir respuesta ──────────────────────────
-// frame:     trama SIN CRC
-// frame_len: longitud sin CRC
-// resp:      buffer de respuesta
-// resp_max:  tamaño máximo del buffer
-// Devuelve bytes recibidos, o -1 en error/timeout.
+// ── Transacción Modbus ────────────────────────────────────────
 static int _modbus_transaction(const uint8_t *frame, size_t frame_len,
-                               uint8_t *resp,  size_t resp_max)
+                               uint8_t *resp, size_t resp_max)
 {
     uint8_t tx[frame_len + 2];
     memcpy(tx, frame, frame_len);
@@ -128,16 +139,9 @@ static int _modbus_transaction(const uint8_t *frame, size_t frame_len,
 
     int rx_len = uart_read_bytes(KX_MODBUS_UART_NUM, resp, resp_max,
                                   pdMS_TO_TICKS(MODBUS_RESPONSE_TIMEOUT_MS));
-    if (rx_len <= 0) {
-        return -1;  // timeout real
-    }
+    if (rx_len <= 0) return -1;
+    if (rx_len < 4)  return -1;
 
-    if (rx_len < 4) {
-        ESP_LOGW(TAG, "response too short: rx=%d", rx_len);
-        return -1;
-    }
-
-    // validar CRC
     uint16_t rx_crc   = ((uint16_t)resp[rx_len - 1] << 8) | resp[rx_len - 2];
     uint16_t calc_crc = _crc16(resp, rx_len - 2);
     if (rx_crc != calc_crc) {
@@ -145,7 +149,6 @@ static int _modbus_transaction(const uint8_t *frame, size_t frame_len,
         return -1;
     }
 
-    // exception response: bit 7 del function code activo
     if (resp[1] & 0x80) {
         uint8_t exc = (rx_len > 2) ? resp[2] : 0;
         ESP_LOGW(TAG, "Modbus exception: fc=0x%02x exc=0x%02x", resp[1], exc);
@@ -155,65 +158,41 @@ static int _modbus_transaction(const uint8_t *frame, size_t frame_len,
     return rx_len;
 }
 
-// ── Leer un registro o coil ───────────────────────────────────
-// Soporta FC01, FC02, FC03, FC04.
-// Devuelve el valor escalado, o -FLT_MAX en error.
+// ── Leer un registro ──────────────────────────────────────────
 static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
                              uint8_t fc, const kx_param_t *param)
 {
-    uint8_t frame[6];
-    frame[0] = slave_addr;
-    frame[1] = fc;
-    frame[2] = (uint8_t)(reg_addr >> 8);
-    frame[3] = (uint8_t)(reg_addr & 0xFF);
-    frame[4] = 0x00;
-    frame[5] = 0x01;   // leer 1 registro / 1 coil
+    uint8_t frame[6] = {
+        slave_addr,
+        fc,
+        (uint8_t)(reg_addr >> 8),
+        (uint8_t)(reg_addr & 0xFF),
+        0x00,
+        0x01,
+    };
 
     uint8_t resp[16];
     int rx = -1;
 
     for (int attempt = 0; attempt < MODBUS_RETRY_COUNT && rx < 0; attempt++) {
         rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
-        if (rx < 0) {
-            vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
-        }
+        if (rx < 0) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
     }
 
-    if (rx < 0) {
-        return -FLT_MAX;
-    }
-
-    // resp[2] = bytecount
-    if (rx < 4 || resp[2] == 0) {
-        ESP_LOGW(TAG, "short response: rx=%d bytecount=%d", rx, resp[2]);
-        return -FLT_MAX;
-    }
+    if (rx < 0) return -FLT_MAX;
+    if (rx < 4 || resp[2] == 0) return -FLT_MAX;
 
     uint16_t raw;
-
     if (fc == MB_FC_READ_COILS || fc == MB_FC_READ_DISCRETE) {
-        // FC01/FC02: bytecount=1, datos en resp[3], 1 coil = bit 0
         raw = resp[3] & 0x01;
-
     } else {
-        // FC03/FC04: bytecount=2, datos en resp[3..4] big-endian
-        if (rx < 5 || resp[2] < 2) {
-            ESP_LOGW(TAG, "short FC%02d response: rx=%d bytecount=%d",
-                     fc, rx, resp[2]);
-            return -FLT_MAX;
-        }
+        if (rx < 5 || resp[2] < 2) return -FLT_MAX;
         raw = ((uint16_t)resp[3] << 8) | resp[4];
     }
 
-    float value = (float)(int16_t)raw;   // signed: permite valores negativos
-
-    // escala/offset del param
-    if (param->offset != 0.0f && param->offset != 1.0f) {
-        value = value * param->offset;
-    }
+    float value = (float)(int16_t)raw;
+    if (param->offset != 0.0f && param->offset != 1.0f) value *= param->offset;
     value += param->addition;
-
-    // clamp al rango
     if (value < param->minvalue) value = param->minvalue;
     if (value > param->maxvalue) value = param->maxvalue;
 
@@ -221,13 +200,8 @@ static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
 }
 
 // ── Contexto de iteración ─────────────────────────────────────
-typedef struct {
-    int total;      // total de params a leer en este ciclo
-    int done;       // params procesados (ok + error)
-    int ok;         // lecturas exitosas
-    int errors;     // errores Modbus
-    int last_pct;   // último porcentaje de barra impreso
-} _poll_ctx_t;
+typedef struct { int total; int done; int ok; int errors; } _poll_ctx_t;
+typedef struct { int count; } _count_ctx_t;
 
 // ── Barra de progreso ─────────────────────────────────────────
 #define POLL_BAR_WIDTH 30
@@ -235,89 +209,61 @@ typedef struct {
 static void _print_progress(int control_id, int done, int total)
 {
     if (total <= 0) return;
-
-    int pct   = (done * 100) / total;
-    int fill  = (done * POLL_BAR_WIDTH) / total;
-
+    int pct  = (done * 100) / total;
+    int fill = (done * POLL_BAR_WIDTH) / total;
     char bar[POLL_BAR_WIDTH + 1];
-    for (int i = 0; i < POLL_BAR_WIDTH; i++) {
-        bar[i] = (i < fill) ? '#' : '-';
-    }
+    for (int i = 0; i < POLL_BAR_WIDTH; i++) bar[i] = (i < fill) ? '#' : '-';
     bar[POLL_BAR_WIDTH] = '\0';
-
-    // \r para sobreescribir la línea en terminales que lo soporten
-    printf("[poll] ctrl=%d [%s] %3d%% (%d/%d params)\r",
-           control_id, bar, pct, done, total);
+    printf("[poll] ctrl=%d [%s] %3d%% (%d/%d params)\r", control_id, bar, pct, done, total);
     fflush(stdout);
-
-    // salto de línea en los hitos para que quede en el log
-    if (pct == 25 || pct == 50 || pct == 75 || pct == 100) {
-        printf("\n");
-        fflush(stdout);
-    }
+    if (pct == 25 || pct == 50 || pct == 75 || pct == 100) { printf("\n"); fflush(stdout); }
 }
 
-// ── Publicar valor en MQTT ────────────────────────────────────
+// ── Publicar valor / error ────────────────────────────────────
 static void _publish_value(int control_id, const kx_param_t *param, float value)
 {
     if (param->function_read != 0) {
-
         if (param->sampling != 0) {
-        // 1. Enviamos el REPORT (Dato histórico/telemetría)
-        kx_param_pub_report(control_id, param->param_id, value);
-        ESP_LOGW(TAG, "report → ctrl=%d param=%d val=%.3f", control_id, param->param_id, value);
+            kx_param_pub_report(control_id, param->param_id, value);
+            ESP_LOGW(TAG, "report ctrl=%d param=%d value=%.3f", control_id, param->param_id, value);
         }
-
-        // 2. Enviamos el STATUS (Estado actual del canal)
         kx_param_pub_status(control_id, param->param_id, value);
         
-        
-        
-        ESP_LOGD(TAG, "-> read ok ctrl=%d param=%d val=%.3f", control_id, param->param_id, value);
     } else {
-        // Caso de escritura (SET)
         kx_param_pub_set(control_id, param->param_id, value);
     }
 }
 
-// ── Publicar error de lectura ─────────────────────────────────
 static void _publish_error(int control_id, const kx_param_t *param, const char *reason)
 {
-    // Solo enviamos STATUS informando del error (no se envía REPORT si hay error)
     kx_param_pub_error_modbus(control_id, param->param_id, (uint16_t)param->reg, reason);
-    
     ESP_LOGW(TAG, "modbus error ctrl=%d param=%d reg=0x%04x: %s",
              control_id, param->param_id, param->reg, reason);
 }
 
-// ── Callback de iteración: lee y publica cada param ──────────
-static void _poll_param(int control_id,
-                         const kx_param_t *param,
-                         void *user_data)
+// ── Callback de iteración ─────────────────────────────────────
+// Sin xEventGroupWaitBits interno: la pausa se gestiona a nivel
+// de ciclo completo mediante s_foreach_mutex, garantizando que
+// clear_entities() nunca se ejecuta con el iterador activo.
+static void _poll_param(int control_id, const kx_param_t *param, void *user_data)
 {
     _poll_ctx_t *ctx = (_poll_ctx_t *)user_data;
 
-    // ignorar params sin función alguna
     if (param->function_read == 0 && param->function_write == 0) return;
-
-    // ignorar params ocultos
     if (param->view == 0) return;
 
-    // obtener slave_addr del store
     const kx_control_params_t *ctrl = kx_param_store_get(control_id);
     if (!ctrl || ctrl->slave_addr == 0) return;
-    uint8_t slave_addr = (uint8_t)ctrl->slave_addr;
 
-    // solo FCs de lectura
     uint8_t fc_read = (uint8_t)param->function_read;
     bool is_read_fc = (fc_read == MB_FC_READ_COILS        ||
                        fc_read == MB_FC_READ_DISCRETE      ||
                        fc_read == MB_FC_READ_HOLDING_REGS  ||
                        fc_read == MB_FC_READ_INPUT_REGS);
+    if (!is_read_fc) return;
 
-    if (!is_read_fc) return;   // write-only: se gestiona por comando
-
-    float value = _read_register(slave_addr, (uint16_t)param->reg, fc_read, param);
+    float value = _read_register((uint8_t)ctrl->slave_addr,
+                                  (uint16_t)param->reg, fc_read, param);
 
     if (value == -FLT_MAX) {
         _publish_error(control_id, param, "modbus_timeout");
@@ -335,21 +281,14 @@ static void _poll_param(int control_id,
     vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_PARAM_MS));
 }
 
-// ── Contar params legibles de un control ──────────────────────
-// Necesitamos el total antes de iterar para la barra.
-typedef struct { int count; } _count_ctx_t;
-
 static void _count_readable(int control_id, const kx_param_t *param, void *user_data)
 {
     _count_ctx_t *c = (_count_ctx_t *)user_data;
     if (param->function_read == 0 && param->function_write == 0) return;
     if (param->view == 0) return;
     uint8_t fc = (uint8_t)param->function_read;
-    bool is_read_fc = (fc == MB_FC_READ_COILS       ||
-                       fc == MB_FC_READ_DISCRETE     ||
-                       fc == MB_FC_READ_HOLDING_REGS ||
-                       fc == MB_FC_READ_INPUT_REGS);
-    if (is_read_fc) c->count++;
+    if (fc == MB_FC_READ_COILS || fc == MB_FC_READ_DISCRETE ||
+        fc == MB_FC_READ_HOLDING_REGS || fc == MB_FC_READ_INPUT_REGS) c->count++;
 }
 
 // ── Tarea principal ───────────────────────────────────────────
@@ -363,27 +302,40 @@ static void _modbus_task(void *arg)
 
     ESP_LOGI(TAG, "entities ready (%d controls) — starting Modbus polling",
              kx_param_store_count());
-
     vTaskDelay(pdMS_TO_TICKS(4000));
 
     while (s_running) {
+
+        // Esperar permiso (fuera del mutex para que pause() pueda tomarlo)
+        xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
+                            pdFALSE, pdTRUE, portMAX_DELAY);
+
         if (!kx_mqtt_is_connected()) {
-            ESP_LOGD(TAG, "skip poll: mqtt not connected");
             vTaskDelay(pdMS_TO_TICKS(KX_TELEMETRY_INTERVAL_S * 1000));
             continue;
         }
 
-        // contar params legibles para la barra
+        if (!kx_param_store_is_ready()) {
+            // Entities borradas por update_ts mayor, esperar a que lleguen
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        // Proteger el foreach: pause() no puede liberar memoria hasta
+        // que este mutex sea liberado al final del ciclo.
+        xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
+
+        // Re-verificar tras tomar el mutex
+        if (!s_running || !kx_param_store_is_ready()) {
+            xSemaphoreGive(s_foreach_mutex);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
         _count_ctx_t cc = { .count = 0 };
         kx_param_store_foreach(_count_readable, &cc);
 
-        _poll_ctx_t ctx = {
-            .total    = cc.count,
-            .done     = 0,
-            .ok       = 0,
-            .errors   = 0,
-            .last_pct = -1,
-        };
+        _poll_ctx_t ctx = { .total = cc.count, .done = 0, .ok = 0, .errors = 0 };
 
         ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         ESP_LOGI(TAG, "poll cycle: %d controls | %d params | heap=%" PRIu32,
@@ -391,8 +343,9 @@ static void _modbus_task(void *arg)
 
         kx_param_store_foreach(_poll_param, &ctx);
 
-        // línea final de resumen
-        ESP_LOGI(TAG, "poll done: read=%d errors=%d | published to platform | heap=%" PRIu32,
+        xSemaphoreGive(s_foreach_mutex);
+
+        ESP_LOGI(TAG, "poll done: read=%d errors=%d | heap=%" PRIu32,
                  ctx.ok, ctx.errors, kx_system_heap_free());
         ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
@@ -404,45 +357,90 @@ static void _modbus_task(void *arg)
     vTaskDelete(NULL);
 }
 
-// ── API pública ───────────────────────────────────────────────
+// =============================================================
+// API pública — pause / resume
+//
+// pause():
+//   1. Limpia POLL_ALLOWED_BIT → el task no iniciará un nuevo
+//      ciclo una vez que el actual termine.
+//   2. Toma s_foreach_mutex → se bloquea hasta que el foreach
+//      en curso libere el mutex. Si el task está en vTaskDelay
+//      entre ciclos (fuera del mutex), el take es inmediato.
+//   3. Retorna con el mutex tomado: el task no puede entrar en
+//      un nuevo foreach hasta resume().
+//
+// Es seguro llamar a kx_param_store_clear_entities() entre
+// pause() y resume().
+// =============================================================
+void kx_modbus_pause(void)
+{
+    if (!s_poll_eg || !s_foreach_mutex) return;
+
+    ESP_LOGI(TAG, "pausing Modbus polling...");
+    xEventGroupClearBits(s_poll_eg, POLL_ALLOWED_BIT);
+
+    // Timeout generoso: worst case 311 params × ~130 ms = ~40 s
+    if (xSemaphoreTake(s_foreach_mutex, pdMS_TO_TICKS(60000)) != pdTRUE) {
+        ESP_LOGE(TAG, "pause: timeout waiting for foreach — memory risk!");
+    } else {
+        ESP_LOGI(TAG, "Modbus polling paused (foreach complete)");
+    }
+    // Mutex retenido hasta resume()
+}
+
+void kx_modbus_resume(void)
+{
+    if (!s_poll_eg || !s_foreach_mutex) return;
+    xSemaphoreGive(s_foreach_mutex);
+    xEventGroupSetBits(s_poll_eg, POLL_ALLOWED_BIT);
+    ESP_LOGI(TAG, "Modbus polling resumed");
+}
+
+// =============================================================
+// API pública — start / stop
+// =============================================================
 esp_err_t kx_modbus_master_start(void)
 {
-    if (s_running) {
-        ESP_LOGW(TAG, "already running");
-        return ESP_OK;
-    }
+    if (s_running) { ESP_LOGW(TAG, "already running"); return ESP_OK; }
+
+    s_poll_eg = xEventGroupCreate();
+    if (!s_poll_eg) { ESP_LOGE(TAG, "failed to create EventGroup"); return ESP_FAIL; }
+
+    s_foreach_mutex = xSemaphoreCreateMutex();
+    if (!s_foreach_mutex) { ESP_LOGE(TAG, "failed to create mutex"); return ESP_FAIL; }
+
+    xEventGroupSetBits(s_poll_eg, POLL_ALLOWED_BIT);
 
     esp_err_t err = _uart_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "UART init failed: %s", esp_err_to_name(err));
-        return err;
-    }
+    if (err != ESP_OK) { ESP_LOGE(TAG, "UART init failed: %s", esp_err_to_name(err)); return err; }
 
     s_running = true;
-
-    BaseType_t ret = xTaskCreate(
-        _modbus_task,
-        "kx_modbus",
-        8192,
-        NULL,
-        KX_TASK_PRIO_TELEMETRY,
-        &s_task
-    );
-
-    if (ret != pdPASS) {
-        s_running = false;
-        return ESP_FAIL;
-    }
+    BaseType_t ret = xTaskCreate(_modbus_task, "kx_modbus", 8192, NULL,
+                                  KX_TASK_PRIO_TELEMETRY, &s_task);
+    if (ret != pdPASS) { s_running = false; return ESP_FAIL; }
 
     return ESP_OK;
 }
 
-void kx_modbus_master_stop(void)
-{
-    s_running = false;
-}
+void kx_modbus_master_stop(void) { s_running = false; }
 
-bool kx_modbus_master_is_running(void)
+bool kx_modbus_master_is_running(void) { return s_running; }
+
+esp_err_t kx_modbus_read_one(int control_id, int param_id)
 {
-    return s_running;
+    const kx_param_t *param = kx_param_store_get_param(control_id, param_id);
+    if (!param) return ESP_ERR_NOT_FOUND;
+
+    const kx_control_params_t *ctrl = kx_param_store_get(control_id);
+    if (!ctrl || ctrl->slave_addr == 0) return ESP_ERR_INVALID_STATE;
+
+    float value = _read_register((uint8_t)ctrl->slave_addr,
+                                  (uint16_t)param->reg,
+                                  (uint8_t)param->function_read, param);
+    if (value == -FLT_MAX) {
+        _publish_error(control_id, param, "modbus_timeout");
+        return ESP_FAIL;
+    }
+    _publish_value(control_id, param, value);
+    return ESP_OK;
 }
