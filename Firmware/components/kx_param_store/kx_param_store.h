@@ -153,4 +153,4 @@ static inline const kx_control_params_t *kx_param_store_get(int control_id)
     return kx_param_store_get_ctrl(control_id);
 }
 
-void kx_param_pub_error(int control_id, int param_id, const char *msg);
+void kx_param_pub_error(int control_id, int param_id, const char *msg, uint16_t reg);

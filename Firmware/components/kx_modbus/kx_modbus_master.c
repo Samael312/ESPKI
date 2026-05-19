@@ -233,7 +233,7 @@ static void _publish_value(int control_id, const kx_param_t *param, float value)
 
 static void _publish_error(int control_id, const kx_param_t *param, const char *reason)
 {
-    kx_param_pub_error_modbus(control_id, param->param_id, (uint16_t)param->reg, reason);
+    kx_param_pub_error(control_id, param->param_id, reason, (uint16_t)param->reg);
     ESP_LOGW(TAG, "modbus error ctrl=%d param=%d reg=0x%04x: %s",
              control_id, param->param_id, param->reg, reason);
 }

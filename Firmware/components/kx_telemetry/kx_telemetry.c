@@ -99,7 +99,7 @@ void kx_param_pub_report(int control_id, int param_id, float value)
  * Publica un error genérico.
  * Topic: {uuid}/quiiot/entities/{id}/status
  */
-void kx_param_pub_error(int control_id, int param_id, const char *msg)
+void kx_param_pub_error(int control_id, int param_id, const char *msg, uint16_t reg)
 {
     char topic[128];
     char payload[256];
@@ -116,27 +116,6 @@ void kx_param_pub_error(int control_id, int param_id, const char *msg)
 
 // ─────────────────────────────────────────────────────────────
 // kx_param_handle_set
-//
-// Topic entrante: quiiot/{uuid}/entities/{entity_id}set
-//   El segmento final es literalmente "{entity_id}set"
-//   (sin barra entre el número y "set"), por ejemplo:
-//     quiiot/d041dd10-bf3a-456f-851a-135e2233d577/entities/7748348set
-//
-// Payload esperado (retained):
-//   {"_type":"entity-set","id":7748348,"operation":"set","value":0,"ts":1778839466.340567}
-//
-// Flujo:
-//   1. Extraer entity_id del último segmento del topic.
-//   2. Parsear JSON: verificar operation=="set", leer value y ts.
-//   3. Buscar el param en el hash (todos los controles).
-//   4. Comparar ts entrante con ts_set almacenado en el param.
-//   5. Si ts_nuevo > ts_almacenado:
-//        a. Actualizar ts_set en el hash.
-//        b. Llamar a kx_modbus_write_one() → escribe en el esclavo.
-//   6. Si ts_nuevo <= ts_almacenado: ignorar (mensaje ya procesado).
-// ─────────────────────────────────────────────────────────────
-
-// Contexto auxiliar para la búsqueda por param_id en el foreach
 typedef struct {
     int    target_param_id;
     int    found_control_id;
@@ -157,38 +136,12 @@ static void _find_param_control_cb(int control_id, const kx_param_t *param,
 
 void kx_param_handle_set(const char *topic, const char *payload, size_t len)
 {
-    // ── 1. Extraer entity_id del último segmento del topic ────
+    // ── 1. Validar formato básico del topic ──────────────────
     //
-    // topic: quiiot/{uuid}/entities/{id}set
-    // El último '/' separa "entities" de "{id}set".
-    // Formato del segmento final: dígitos seguidos de "set".
+    // El topic debe terminar estrictamente en "/set"
     const char *last_slash = strrchr(topic, '/');
-    if (!last_slash) {
-        ESP_LOGW(TAG, "handle_set: topic sin '/' — %s", topic);
-        return;
-    }
-    const char *segment = last_slash + 1;   // p.ej. "7748348set"
-
-    // Verificar que el segmento termina en "set"
-    size_t seg_len = strlen(segment);
-    if (seg_len < 4 || strcmp(segment + seg_len - 3, "set") != 0) {
-        ESP_LOGW(TAG, "handle_set: segmento no termina en 'set' — '%s'", segment);
-        return;
-    }
-
-    // Extraer la parte numérica (todo antes de "set")
-    char id_buf[32] = {0};
-    size_t id_len = seg_len - 3;
-    if (id_len == 0 || id_len >= sizeof(id_buf)) {
-        ESP_LOGW(TAG, "handle_set: id_len inválido (%zu) en '%s'", id_len, segment);
-        return;
-    }
-    memcpy(id_buf, segment, id_len);
-    id_buf[id_len] = '\0';
-
-    int entity_id = atoi(id_buf);
-    if (entity_id <= 0) {
-        ESP_LOGW(TAG, "handle_set: entity_id inválido '%s'", id_buf);
+    if (!last_slash || strcmp(last_slash, "/set") != 0) {
+        ESP_LOGW(TAG, "handle_set: El topic no es válido para esta operación — %s", topic);
         return;
     }
 
@@ -199,10 +152,33 @@ void kx_param_handle_set(const char *topic, const char *payload, size_t len)
         return;
     }
 
-    // Verificar operation == "set"
+    // Validar _type == "entity-set"
+    cJSON *type = cJSON_GetObjectItem(root, "_type");
+    if (!type || !cJSON_IsString(type) || strcmp(type->valuestring, "entity-set") != 0) {
+        ESP_LOGD(TAG, "handle_set: _type no es 'entity-set', ignorando topic=%s", topic);
+        cJSON_Delete(root);
+        return;
+    }
+
+    // Validar operation == "set"
     cJSON *op = cJSON_GetObjectItem(root, "operation");
     if (!op || !cJSON_IsString(op) || strcmp(op->valuestring, "set") != 0) {
         ESP_LOGD(TAG, "handle_set: operation no es 'set', ignorando topic=%s", topic);
+        cJSON_Delete(root);
+        return;
+    }
+
+    // Extraer el ID único directamente del JSON (antiguo client_id de la URI)
+    cJSON *id_item = cJSON_GetObjectItem(root, "id");
+    if (!id_item || !cJSON_IsNumber(id_item)) {
+        ESP_LOGW(TAG, "handle_set: Falta el campo numérico 'id' en el payload JSON");
+        cJSON_Delete(root);
+        return;
+    }
+    int entity_id = id_item->valueint;
+
+    if (entity_id <= 0) {
+        ESP_LOGW(TAG, "handle_set: entity_id inválido extraído del JSON (%d)", entity_id);
         cJSON_Delete(root);
         return;
     }
@@ -221,6 +197,7 @@ void kx_param_handle_set(const char *topic, const char *payload, size_t len)
     double incoming_ts = (ts_item && cJSON_IsNumber(ts_item))
                          ? ts_item->valuedouble : 0.0;
 
+    // Ya tenemos todas las variables locales, liberamos el objeto JSON de inmediato de la memoria RAM
     cJSON_Delete(root);
 
     ESP_LOGI(TAG, "handle_set: entity_id=%d value=%.3f ts_in=%.3f",
@@ -257,8 +234,6 @@ void kx_param_handle_set(const char *topic, const char *payload, size_t len)
     // ── 5a. Actualizar ts_set en el hash ──────────────────────
     esp_err_t ts_err = kx_param_store_set_ts_set(control_id, entity_id, incoming_ts);
     if (ts_err != ESP_OK) {
-        // No es bloqueante: el param existe (lo encontramos en foreach)
-        // pero _param_hash puede tener colisión de bucket, poco probable.
         ESP_LOGW(TAG, "handle_set: no se pudo actualizar ts_set entity_id=%d", entity_id);
     }
 
@@ -274,7 +249,7 @@ void kx_param_handle_set(const char *topic, const char *payload, size_t len)
     } else {
         ESP_LOGW(TAG, "handle_set: Modbus FAIL → ctrl=%d entity=%d err=%s",
                  control_id, entity_id, esp_err_to_name(err));
-        kx_param_pub_error_modbus(control_id, entity_id, 0x0000, "modbus_write_error");
+        kx_param_pub_error(control_id, entity_id, "modbus_write_error", 0x0000);
     }
 }
 
