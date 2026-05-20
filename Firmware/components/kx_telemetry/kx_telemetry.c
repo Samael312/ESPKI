@@ -136,15 +136,6 @@ static void _find_param_control_cb(int control_id, const kx_param_t *param,
 
 void kx_param_handle_set(const char *topic, const char *payload, size_t len)
 {
-    // ── 1. Validar formato básico del topic ──────────────────
-    //
-    // El topic debe terminar estrictamente en "/set"
-    const char *last_slash = strrchr(topic, '/');
-    if (!last_slash || strcmp(last_slash, "/set") != 0) {
-        ESP_LOGW(TAG, "handle_set: El topic no es válido para esta operación — %s", topic);
-        return;
-    }
-
     // ── 2. Parsear JSON ───────────────────────────────────────
     cJSON *root = cJSON_ParseWithLength(payload, len);
     if (!root) {
