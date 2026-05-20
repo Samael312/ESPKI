@@ -469,45 +469,43 @@ esp_err_t kx_modbus_write_one(int control_id, int param_id, float value)
     }
  
     // ── Transformación inversa value → raw ───────────────────
-    //
-    // _read_register aplica:
-    //   value = (float)(int16_t)raw
-    //   if (offset != 0.0f && offset != 1.0f) value *= offset;
-    //   value += addition;
-    //
-    // La inversa es:
-    //   adjusted = value - addition
-    //   raw = (offset != 0.0f && offset != 1.0f) ? adjusted / offset : adjusted
-    float adjusted = value - param->addition;
     int16_t raw;
  
-    if (param->offset != 0.0f && param->offset != 1.0f) {
-        raw = (int16_t)(adjusted / param->offset);
+    if (fc_write == MB_FC_WRITE_SINGLE_COIL) {
+        // [FIX] Para Coils (FC 05), Modbus requiere estrictamente 0xFF00 para ON y 0x0000 para OFF.
+        // Ignoramos por completo offsets, additions y el clamping de registros.
+        raw = (value > 0.0f) ? (int16_t)0xFF00 : 0x0000;
     } else {
-        raw = (int16_t)adjusted;
+        // Lógica normal para registros (FC 06, FC 16, etc.)
+        // value = (float)(int16_t)raw -> inversa: adjusted = value - addition
+        float adjusted = value - param->addition;
+ 
+        if (param->offset != 0.0f && param->offset != 1.0f) {
+            raw = (int16_t)(adjusted / param->offset);
+        } else {
+            raw = (int16_t)adjusted;
+        }
+ 
+        // Clampear al rango permitido (en unidades raw, pre-transformación)
+        if ((float)raw < param->minvalue) raw = (int16_t)param->minvalue;
+        if ((float)raw > param->maxvalue) raw = (int16_t)param->maxvalue;
     }
  
-    // Clampear al rango permitido (en unidades raw, pre-transformación)
-    if ((float)raw < param->minvalue) raw = (int16_t)param->minvalue;
-    if ((float)raw > param->maxvalue) raw = (int16_t)param->maxvalue;
- 
+    // Modificado el log para imprimir también en Hexadecimal (ayuda mucho con las Coils)
     ESP_LOGI(TAG, "write_one: ctrl=%d param=%d reg=0x%04x fc=0x%02x "
-             "slave=%d value=%.3f → raw=%d",
+             "slave=%d value=%.3f → raw=%d (0x%04X)",
              control_id, param_id, param->reg, fc_write,
-             ctrl->slave_addr, value, (int)raw);
+             ctrl->slave_addr, value, (int)(uint16_t)raw, (uint16_t)raw);
  
-    // ── Construir trama Modbus FC 06 ──────────────────────────
-    //
-    // FC 06 — Write Single Register:
-    //   [addr][0x06][reg_hi][reg_lo][val_hi][val_lo]
-    // El esclavo responde con un eco idéntico de 6 bytes + CRC.
+    // ── Construir trama Modbus ────────────────────────────────
+    // Nota: El arreglo de 6 bytes funciona idéntico tanto para FC 05 como para FC 06.
     uint8_t frame[6] = {
         (uint8_t)ctrl->slave_addr,
         fc_write,
         (uint8_t)((uint16_t)param->reg >> 8),
         (uint8_t)((uint16_t)param->reg & 0xFF),
-        (uint8_t)((uint16_t)(uint16_t)raw >> 8),
-        (uint8_t)((uint16_t)(uint16_t)raw & 0xFF),
+        (uint8_t)((uint16_t)raw >> 8),
+        (uint8_t)((uint16_t)raw & 0xFF),
     };
  
     uint8_t resp[16];
@@ -527,11 +525,8 @@ esp_err_t kx_modbus_write_one(int control_id, int param_id, float value)
         return ESP_FAIL;
     }
  
-    // ── Validar respuesta eco (FC 06) ─────────────────────────
-    //
-    // Una respuesta válida de FC 06 tiene exactamente los mismos
-    // primeros 4 bytes que la trama enviada (addr, fc, reg_hi, reg_lo).
-    // Los bytes 4-5 contienen el valor que el esclavo aceptó.
+    // ── Validar respuesta eco (FC 05 y FC 06) ─────────────────
+    // Ambos comandos devuelven un espejo exacto de los primeros 4 bytes.
     if (rx < 6 ||
         resp[0] != frame[0] ||   // slave_addr
         resp[1] != frame[1] ||   // function code
