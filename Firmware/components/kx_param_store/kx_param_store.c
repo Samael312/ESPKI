@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <float.h>
 
 #include "../../main/kx_config.h"
 
@@ -21,10 +22,12 @@ static const char *TAG = "kx_param_store";
 #define NVS_KEY_UUID     "uuid"
 #define NVS_KEY_FW       "fw"
 #define NVS_KEY_COUNT    "count"
-#define NVS_MAGIC_VALUE  0xE5712A03U   // bumpeado: nueva estructura con update_ts
+#define NVS_MAGIC_VALUE  0xE5712A04U
 
-// Formato blob NVS para un control:
-//   [ kx_nvs_ctrl_hdr_t ][ kx_param_t × count ]
+#define NVS_MAX_BLOB      3840U
+#define NVS_CHUNK_PARAMS  (NVS_MAX_BLOB / sizeof(kx_param_t)) 
+#define NVS_PARTITION  "storage"
+
 typedef struct {
     int    control_id;
     int    slave_addr;
@@ -82,7 +85,6 @@ static kx_control_t *_ctrl_find_or_create(int control_id)
 
     while (node) {
         if (node->ctrl.control_id == control_id) {
-            // Ya existe: limpiar params pero conservar metadatos
             for (int b = 0; b < KX_PARAM_HASH_BUCKETS; b++) {
                 kx_param_node_t *pn = node->ctrl.params.buckets[b];
                 while (pn) {
@@ -142,7 +144,14 @@ static esp_err_t _param_insert(kx_control_t *ctrl, const kx_param_t *param)
 
     while (node) {
         if (node->param.param_id == param->param_id) {
+            // Preservar campos de runtime antes de sobrescribir la config
+            int64_t saved_ts_last_read         = node->param.ts_last_read;
+            float   saved_last_published_value = node->param.last_published_value;
+
             memcpy(&node->param, param, sizeof(kx_param_t));
+
+            node->param.ts_last_read         = saved_ts_last_read;
+            node->param.last_published_value = saved_last_published_value;
             return ESP_OK;
         }
         node = node->next;
@@ -159,6 +168,11 @@ static esp_err_t _param_insert(kx_control_t *ctrl, const kx_param_t *param)
         return ESP_ERR_NO_MEM;
     }
     memcpy(&new_node->param, param, sizeof(kx_param_t));
+
+    // Inicializar campos de runtime para nodos nuevos
+    new_node->param.ts_last_read         = 0;       // nunca leído → leer en primer ciclo
+    new_node->param.last_published_value = FLT_MAX; // nunca publicado → publicar en primer ciclo
+
     new_node->next            = ctrl->params.buckets[idx];
     ctrl->params.buckets[idx] = new_node;
     ctrl->params.count++;
@@ -166,6 +180,19 @@ static esp_err_t _param_insert(kx_control_t *ctrl, const kx_param_t *param)
 }
 
 static const kx_param_t *_param_find(const kx_control_t *ctrl, int param_id)
+{
+    uint32_t idx = _param_hash(param_id);
+    kx_param_node_t *node = ctrl->params.buckets[idx];
+    while (node) {
+        if (node->param.param_id == param_id) return &node->param;
+        node = node->next;
+    }
+    return NULL;
+}
+
+// Versión mutable — usada por kx_modbus_master para actualizar
+// ts_last_read y last_published_value sin copias adicionales.
+static kx_param_t *_param_find_mutable(kx_control_t *ctrl, int param_id)
 {
     uint32_t idx = _param_hash(param_id);
     kx_param_node_t *node = ctrl->params.buckets[idx];
@@ -230,6 +257,20 @@ static void _print_progress(int control_id, int done, int total)
     }
 }
 
+// ── Inicialización de la partición (llamar desde kx_param_store_init) ──
+static void _nvs_storage_init(void)
+{
+    esp_err_t err = nvs_flash_init_partition(NVS_PARTITION);
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "storage partition: erasing and reinit");
+        nvs_flash_erase_partition(NVS_PARTITION);
+        err = nvs_flash_init_partition(NVS_PARTITION);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "storage partition init failed: %s", esp_err_to_name(err));
+    }
+}
 // =============================================================
 // API pública — ciclo de vida
 // =============================================================
@@ -237,6 +278,7 @@ void kx_param_store_init(void)
 {
     if (s_initialized) return;
     memset(&s_hash, 0, sizeof(s_hash));
+    _nvs_storage_init(); 
     s_initialized = true;
     ESP_LOGI(TAG, "hash store initialized (ctrl_buckets=%d param_buckets=%d)",
              KX_CTRL_HASH_BUCKETS, KX_PARAM_HASH_BUCKETS);
@@ -297,6 +339,10 @@ esp_err_t kx_param_store_parse(const char *payload, size_t len, int control_id)
         cJSON *add = cJSON_GetObjectItem(reg, "control_parameter_addition");
         p.addition = (add && cJSON_IsNumber(add)) ? (float)add->valuedouble : 0.0f;
 
+        // Los campos de runtime se inicializan en _param_insert
+        p.ts_last_read         = 0;
+        p.last_published_value = FLT_MAX;
+
         if (p.param_id <= 0) continue;
 
         if (_param_insert(ctrl, &p) == ESP_OK) {
@@ -330,6 +376,13 @@ const kx_param_t *kx_param_store_get_param(int control_id, int param_id)
     const kx_control_t *ctrl = _ctrl_find(control_id);
     if (!ctrl) return NULL;
     return _param_find(ctrl, param_id);
+}
+
+kx_param_t *kx_param_store_get_param_mutable(int control_id, int param_id)
+{
+    kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) return NULL;
+    return _param_find_mutable(ctrl, param_id);
 }
 
 int kx_param_store_count(void)
@@ -370,15 +423,22 @@ void kx_param_store_set_expected(int count)
 
 bool kx_param_store_is_ready(void)
 {
-    if (s_expected <= 0 || s_hash.count < s_expected) return false;
+    if (s_expected <= 0) return false;
+
+    // Contar cuántos nodos tienen entities_ready == true.
+    // No exigimos s_hash.count == s_expected porque pueden existir
+    // nodos "fantasma" (p.ej. cargados desde NVS y luego borrados
+    // sus entities por update_ts) que no deben bloquear el arranque.
+    int ready_count = 0;
     for (int ci = 0; ci < KX_CTRL_HASH_BUCKETS; ci++) {
         kx_ctrl_node_t *cn = s_hash.buckets[ci];
         while (cn) {
-            if (!cn->ctrl.entities_ready) return false;
+            if (cn->ctrl.entities_ready && cn->ctrl.params.count > 0)
+                ready_count++;
             cn = cn->next;
         }
     }
-    return true;
+    return (ready_count >= s_expected);
 }
 
 // =============================================================
@@ -456,7 +516,6 @@ void kx_param_store_set_progress_cb(kx_param_progress_cb_t cb)
 
 esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts)
 {
-    // Necesitamos acceso mutable al nodo; reutilizamos el hash privado.
     uint32_t cidx = _ctrl_hash(control_id);
     kx_ctrl_node_t *cn = s_hash.buckets[cidx];
     while (cn) {
@@ -470,25 +529,20 @@ esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts)
                 }
                 pn = pn->next;
             }
-            return ESP_ERR_NOT_FOUND; // control existe pero param no
+            return ESP_ERR_NOT_FOUND;
         }
         cn = cn->next;
     }
-    return ESP_ERR_NOT_FOUND; // control no existe
+    return ESP_ERR_NOT_FOUND;
 }
-
 
 // =============================================================
 // Persistencia NVS
-// La caché almacena controles con update_ts, slave_addr, uuid y
-// sus entities. La validación ya no depende de FW version sino
-// de magic + device uuid. La decisión de refrescar entities se
-// toma en kx_config_handler comparando update_ts.
 // =============================================================
 bool kx_param_store_nvs_valid(void)
 {
     nvs_handle_t h;
-    if (nvs_open(NVS_NS_STORE, NVS_READONLY, &h) != ESP_OK) return false;
+    if (nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE, NVS_READONLY, &h) != ESP_OK) return false;
 
     uint32_t magic = 0;
     nvs_get_u32(h, NVS_KEY_MAGIC, &magic);
@@ -510,7 +564,7 @@ esp_err_t kx_param_store_save_nvs(void)
     if (!s_initialized || s_hash.count == 0) return ESP_ERR_INVALID_STATE;
 
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS_STORE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs open rw failed: %s", esp_err_to_name(err));
         return err;
@@ -526,48 +580,82 @@ esp_err_t kx_param_store_save_nvs(void)
         kx_ctrl_node_t *cn = s_hash.buckets[ci];
         while (cn) {
             kx_control_t *ctrl = &cn->ctrl;
+            int total_params = ctrl->params.count;
 
-            size_t blob_size = sizeof(kx_nvs_ctrl_hdr_t)
-                             + (size_t)ctrl->params.count * sizeof(kx_param_t);
-            uint8_t *blob = malloc(blob_size);
-            if (!blob) {
-                ESP_LOGE(TAG, "OOM building NVS blob for ctrl=%d", ctrl->control_id);
-                cn = cn->next;
-                continue;
-            }
-
+            // ── Cabecera del control ──────────────────────────
             kx_nvs_ctrl_hdr_t hdr = {
                 .control_id = ctrl->control_id,
                 .slave_addr = ctrl->slave_addr,
-                .count      = ctrl->params.count,
+                .count      = total_params,
                 .update_ts  = ctrl->update_ts,
             };
             snprintf(hdr.uuid, sizeof(hdr.uuid), "%s", ctrl->uuid);
-            memcpy(blob, &hdr, sizeof(hdr));
 
-            uint8_t *ptr = blob + sizeof(hdr);
-            for (int pi = 0; pi < KX_PARAM_HASH_BUCKETS; pi++) {
+            char hdr_key[16];
+            snprintf(hdr_key, sizeof(hdr_key), "hdr_%d", ctrl_idx);
+            err = nvs_set_blob(h, hdr_key, &hdr, sizeof(hdr));
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "nvs: hdr write %s failed: %s",
+                         hdr_key, esp_err_to_name(err));
+                cn = cn->next;
+                ctrl_idx++;
+                continue;
+            }
+
+            // ── Serializar params en un array temporal ────────
+            kx_param_t *flat = malloc(total_params * sizeof(kx_param_t));
+            if (!flat) {
+                ESP_LOGE(TAG, "OOM building flat params ctrl=%d", ctrl->control_id);
+                cn = cn->next;
+                ctrl_idx++;
+                continue;
+            }
+
+            int idx = 0;
+            for (int pi = 0; pi < KX_PARAM_HASH_BUCKETS && idx < total_params; pi++) {
                 kx_param_node_t *pn = ctrl->params.buckets[pi];
-                while (pn) {
-                    memcpy(ptr, &pn->param, sizeof(kx_param_t));
-                    ptr += sizeof(kx_param_t);
-                    pn   = pn->next;
+                while (pn && idx < total_params) {
+                    memcpy(&flat[idx++], &pn->param, sizeof(kx_param_t));
+                    pn = pn->next;
                 }
             }
 
-            char key[16];
-            snprintf(key, sizeof(key), "ctrl_%d", ctrl_idx++);
-            err = nvs_set_blob(h, key, blob, blob_size);
-            free(blob);
+            // ── Guardar en chunks ─────────────────────────────
+            int chunks = (total_params + NVS_CHUNK_PARAMS - 1) / NVS_CHUNK_PARAMS;
+            if (chunks == 0) chunks = 1;  // aunque sea 0 params, guardar cabecera
 
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "nvs write %s failed: %s", key, esp_err_to_name(err));
-            } else {
-                ESP_LOGI(TAG, "nvs: saved ctrl=%d uuid=%s ts=%.3f params=%d",
-                         ctrl->control_id, ctrl->uuid, ctrl->update_ts, ctrl->params.count);
+            for (int j = 0; j < chunks; j++) {
+                int offset    = j * NVS_CHUNK_PARAMS;
+                int count     = total_params - offset;
+                if (count > (int)NVS_CHUNK_PARAMS) count = NVS_CHUNK_PARAMS;
+                size_t chunk_bytes = (size_t)count * sizeof(kx_param_t);
+
+                char chunk_key[16];
+                snprintf(chunk_key, sizeof(chunk_key), "p%d_%d", ctrl_idx, j);
+
+                esp_err_t cerr = nvs_set_blob(h, chunk_key,
+                                              flat + offset, chunk_bytes);
+                if (cerr != ESP_OK) {
+                    ESP_LOGW(TAG, "nvs: chunk %s failed: %s",
+                             chunk_key, esp_err_to_name(cerr));
+                } else {
+                    ESP_LOGD(TAG, "nvs: chunk %s → %d params (%zu bytes)",
+                             chunk_key, count, chunk_bytes);
+                }
             }
+            free(flat);
+
+            // Guardar número de chunks para la carga
+            char nchunks_key[16];
+            snprintf(nchunks_key, sizeof(nchunks_key), "nc_%d", ctrl_idx);
+            nvs_set_u8(h, nchunks_key, (uint8_t)chunks);
+
+            ESP_LOGI(TAG, "nvs: saved ctrl=%d uuid=%s ts=%.3f params=%d chunks=%d",
+                     ctrl->control_id, ctrl->uuid,
+                     ctrl->update_ts, total_params, chunks);
 
             cn = cn->next;
+            ctrl_idx++;
         }
     }
 
@@ -575,7 +663,7 @@ esp_err_t kx_param_store_save_nvs(void)
     nvs_close(h);
 
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "nvs: saved %d controls (uuid=%s)", s_hash.count, KX_DEVICE_UUID);
+        ESP_LOGI(TAG, "nvs: commit OK — %d controls saved", s_hash.count);
     }
     return err;
 }
@@ -585,7 +673,7 @@ esp_err_t kx_param_store_load_nvs(void)
     if (!s_initialized) kx_param_store_init();
 
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS_STORE, NVS_READONLY, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE, NVS_READONLY, &h);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "nvs open failed: %s", esp_err_to_name(err));
         return err;
@@ -596,54 +684,73 @@ esp_err_t kx_param_store_load_nvs(void)
     ESP_LOGI(TAG, "nvs: loading %d controls...", count);
 
     for (int i = 0; i < count; i++) {
-        char key[16];
-        snprintf(key, sizeof(key), "ctrl_%d", i);
 
-        size_t blob_size = 0;
-        err = nvs_get_blob(h, key, NULL, &blob_size);
-        if (err != ESP_OK || blob_size < sizeof(kx_nvs_ctrl_hdr_t)) {
-            ESP_LOGW(TAG, "nvs: key %s missing or too small", key);
-            continue;
-        }
+        // ── Leer cabecera ─────────────────────────────────────
+        char hdr_key[16];
+        snprintf(hdr_key, sizeof(hdr_key), "hdr_%d", i);
 
-        uint8_t *blob = malloc(blob_size);
-        if (!blob) {
-            ESP_LOGE(TAG, "OOM loading blob %s", key);
-            continue;
-        }
-
-        err = nvs_get_blob(h, key, blob, &blob_size);
+        size_t hdr_sz = sizeof(kx_nvs_ctrl_hdr_t);
+        kx_nvs_ctrl_hdr_t hdr = {0};
+        err = nvs_get_blob(h, hdr_key, &hdr, &hdr_sz);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "nvs: read %s failed: %s", key, esp_err_to_name(err));
-            free(blob);
+            ESP_LOGW(TAG, "nvs: hdr %s missing: %s",
+                     hdr_key, esp_err_to_name(err));
             continue;
         }
-
-        kx_nvs_ctrl_hdr_t hdr;
-        memcpy(&hdr, blob, sizeof(hdr));
 
         kx_control_t *ctrl = _ctrl_find_or_create(hdr.control_id);
-        if (!ctrl) {
-            free(blob);
-            continue;
-        }
+        if (!ctrl) continue;
         ctrl->slave_addr = hdr.slave_addr;
         ctrl->update_ts  = hdr.update_ts;
         snprintf(ctrl->uuid, sizeof(ctrl->uuid), "%s", hdr.uuid);
 
-        kx_param_t *params     = (kx_param_t *)(blob + sizeof(hdr));
-        int         params_in_blob = (int)((blob_size - sizeof(hdr)) / sizeof(kx_param_t));
-        int         loaded     = 0;
+        // ── Número de chunks ──────────────────────────────────
+        char nchunks_key[16];
+        snprintf(nchunks_key, sizeof(nchunks_key), "nc_%d", i);
+        uint8_t n_chunks = 1;
+        nvs_get_u8(h, nchunks_key, &n_chunks);
 
-        for (int p = 0; p < params_in_blob && p < hdr.count; p++) {
-            if (_param_insert(ctrl, &params[p]) == ESP_OK) loaded++;
+        int total_loaded = 0;
+
+        for (int j = 0; j < n_chunks; j++) {
+            char chunk_key[16];
+            snprintf(chunk_key, sizeof(chunk_key), "p%d_%d", i, j);
+
+            size_t chunk_bytes = 0;
+            err = nvs_get_blob(h, chunk_key, NULL, &chunk_bytes);
+            if (err != ESP_OK || chunk_bytes == 0) {
+                ESP_LOGW(TAG, "nvs: chunk %s missing", chunk_key);
+                continue;
+            }
+
+            uint8_t *buf = malloc(chunk_bytes);
+            if (!buf) {
+                ESP_LOGE(TAG, "OOM loading chunk %s", chunk_key);
+                continue;
+            }
+
+            err = nvs_get_blob(h, chunk_key, buf, &chunk_bytes);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "nvs: read %s failed: %s",
+                         chunk_key, esp_err_to_name(err));
+                free(buf);
+                continue;
+            }
+
+            int params_in_chunk = (int)(chunk_bytes / sizeof(kx_param_t));
+            kx_param_t *params  = (kx_param_t *)buf;
+
+            for (int p = 0; p < params_in_chunk; p++) {
+                if (_param_insert(ctrl, &params[p]) == ESP_OK) total_loaded++;
+            }
+            free(buf);
         }
 
-        ctrl->entities_ready = (loaded > 0);
-        free(blob);
+        ctrl->entities_ready = (total_loaded > 0);
 
-        ESP_LOGI(TAG, "nvs: ctrl=%d uuid=%s slave=%d ts=%.3f params=%d",
-                 hdr.control_id, hdr.uuid, hdr.slave_addr, hdr.update_ts, loaded);
+        ESP_LOGI(TAG, "nvs: ctrl=%d uuid=%s slave=%d ts=%.3f params=%d chunks=%d",
+                 hdr.control_id, hdr.uuid, hdr.slave_addr,
+                 hdr.update_ts, total_loaded, n_chunks);
     }
 
     nvs_close(h);
@@ -654,7 +761,7 @@ esp_err_t kx_param_store_load_nvs(void)
 esp_err_t kx_param_store_clear_nvs(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS_STORE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
     err = nvs_erase_all(h);
     nvs_commit(h);

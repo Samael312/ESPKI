@@ -48,8 +48,14 @@ typedef struct {
     float   addition;
     int     mask;
     int     view;
-    int     sampling;
+    int     sampling;           // intervalo de publicación en segundos (report)
     double  ts_set;
+
+    // ── Campos de runtime (no se persisten en NVS) ────────────
+    int64_t ts_last_read;       // tick (ms) de la última lectura Modbus
+                                // 0 = nunca leído → siempre leer en primer ciclo
+    float   last_published_value; // último valor enviado en status
+                                  // FLT_MAX = nunca publicado
 } kx_param_t;
 
 // ── Nodo de la lista de params (hash nivel 2) ─────────────────
@@ -130,15 +136,15 @@ double kx_param_store_get_update_ts(int control_id);
 void   kx_param_store_set_update_ts(int control_id, double ts);
 void   kx_param_store_clear_entities(int control_id);
 
-void   kx_param_store_set_update_ts(int control_id, double ts);
-void   kx_param_store_clear_entities(int control_id);
-
 // Borra todas las entities de un control y marca entities_ready=false.
 // Llamar antes de relanzar entities-discovery cuando el ts es mayor.
-void kx_param_store_clear_entities(int control_id);
-
 
 esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts);
+
+// ── Acceso mutable a param (para actualizar campos de runtime) ─
+// Devuelve puntero mutable; llamar solo desde kx_modbus_master.
+kx_param_t *kx_param_store_get_param_mutable(int control_id, int param_id);
+
 // ── Persistencia NVS ─────────────────────────────────────────
 esp_err_t kx_param_store_save_nvs(void);
 esp_err_t kx_param_store_load_nvs(void);

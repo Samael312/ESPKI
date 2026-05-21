@@ -25,7 +25,7 @@
 #define KX_MQTT_RECONNECT_MAX_MS  60000
 
 // ── Telemetría ────────────────────────────────────────────────
-#define KX_TELEMETRY_INTERVAL_S  10
+#define KX_TELEMETRY_INTERVAL_S  5
 
 // ── Tareas FreeRTOS ───────────────────────────────────────────
 #define KX_TASK_STACK_NET         4096
