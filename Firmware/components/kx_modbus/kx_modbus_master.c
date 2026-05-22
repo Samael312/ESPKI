@@ -251,22 +251,6 @@ static inline bool _has_changed(float new_val, float last_val)
     return false;
 }
 
-// Devuelve true si este ciclo (tick_ms) toca publicar "report"
-// según el campo sampling del parámetro.
-// La lógica es: publish si (tick_ms / 1000) % sampling == 0.
-// tick_ms es el tiempo transcurrido desde que arrancó el task,
-// redondeado al intervalo de ciclo base (KX_TELEMETRY_INTERVAL_S).
-static inline bool _sampling_due(const kx_param_t *param, int64_t cycle_s)
-{
-    // Si el sampling es 0 o menor, significa que el reporte por tiempo está apagado
-    if (param->sampling <= 0) {
-        return false;
-    }
-    
-    // Si es mayor a 0, verificamos si toca en este ciclo
-    return (cycle_s % param->sampling) == 0;
-}
-
 // =============================================================
 // Contexto de iteración de poll
 // =============================================================
@@ -323,24 +307,10 @@ static void _enqueue(kx_pub_kind_t kind, int ctrl_id, int param_id,
     }
 }
 
-// =============================================================
-// Callback de iteración — lectura + decisión
-//
-// Por cada parámetro legible:
-//   1. Comprobar si toca leer según sampling (ts_last_read).
-//      Si no toca → skip (incrementar ctx->skipped).
-//   2. Leer por Modbus.
-//   3. Si error → encolar ERROR.
-//   4. Si ok:
-//      a. ¿Ha cambiado? → encolar STATUS.
-//      b. ¿Toca report (sampling_due)? → encolar REPORT.
-//      c. Actualizar ts_last_read y last_published_value.
-// =============================================================
 static void _poll_param(int control_id, const kx_param_t *param, void *user_data)
 {
     _poll_ctx_t *ctx = (_poll_ctx_t *)user_data;
 
-    // ── Filtros básicos ───────────────────────────────────────
     if (param->function_read == 0 && param->function_write == 0) return;
     if (param->view == 0) return;
 
@@ -354,28 +324,42 @@ static void _poll_param(int control_id, const kx_param_t *param, void *user_data
                        fc_read == MB_FC_READ_INPUT_REGS);
     if (!is_read_fc) return;
 
-    // ── 1. ¿Toca leer? (sampling por ts_last_read) ───────────
-    //
-    // ts_last_read = 0 → primer ciclo, siempre leer.
-    // Si ha pasado menos de (sampling * 1000 ms) desde la última
-    // lectura, saltar este parámetro en este ciclo.
-    int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
+    int64_t now_ms      = (int64_t)(esp_timer_get_time() / 1000ULL);
     int     sampling_ms = (param->sampling > 0 ? param->sampling : 60) * 1000;
 
-    if (param->ts_last_read != 0 &&
-        (now_ms - param->ts_last_read) < (int64_t)sampling_ms) {
+    // ── 1. Decidir antes del skip si toca report ──────────────
+    // report_due se evalúa SIEMPRE, independientemente de ts_last_read.
+    // Si el ciclo actual es múltiplo del sampling, forzamos lectura
+    // aunque ts_last_read diga que aún no toca.
+    bool report_due = (param->sampling > 0) &&
+                      (ctx->cycle_s % (int64_t)param->sampling == 0);
+
+    // ── 2. ¿Toca leer por ts? ─────────────────────────────────
+    bool read_due = (param->ts_last_read == 0) ||
+                    ((now_ms - param->ts_last_read) >= (int64_t)sampling_ms);
+
+    // Si no toca ni leer ni reportar → skip
+    if (!read_due && !report_due) {
         ctx->skipped++;
+        ESP_LOGD(TAG,
+            "skip param_id=%d | cycle_s=%" PRId64 "s | sampling=%ds"
+            " | elapsed=%" PRId64 "ms | rem=%" PRId64,
+            param->param_id, ctx->cycle_s, param->sampling,
+            now_ms - param->ts_last_read,
+            (param->sampling > 0
+                ? ctx->cycle_s % (int64_t)param->sampling
+                : (int64_t)-1));
         return;
     }
 
-    // ── 2. Leer por Modbus ────────────────────────────────────
+    // ── 3. Leer por Modbus ────────────────────────────────────
     float value = _read_register((uint8_t)ctrl->slave_addr,
                                   (uint16_t)param->reg, fc_read, param);
 
     ctx->done++;
     _print_progress(control_id, ctx->done, ctx->total);
 
-    // ── 3. Error de lectura ───────────────────────────────────
+    // ── 4. Error de lectura ───────────────────────────────────
     if (value == -FLT_MAX) {
         _enqueue(PUB_KIND_ERROR, control_id, param->param_id,
                  0.0f, (uint16_t)param->reg, "modbus_timeout");
@@ -386,7 +370,7 @@ static void _poll_param(int control_id, const kx_param_t *param, void *user_data
 
     ctx->ok++;
 
-    // ── 4a. STATUS — publicar solo si el valor ha cambiado ────
+    // ── 5a. STATUS — solo si el valor ha cambiado ─────────────
     if (_has_changed(value, param->last_published_value)) {
         _enqueue(PUB_KIND_STATUS, control_id, param->param_id,
                  value, 0, NULL);
@@ -394,16 +378,17 @@ static void _poll_param(int control_id, const kx_param_t *param, void *user_data
         ctx->unchanged++;
     }
 
-    // ── 4b. REPORT — publicar según sampling global del ciclo ─
-    if (param != NULL && _sampling_due(param, ctx->cycle_s)) {
-    
+    // ── 5b. REPORT — con log de diagnóstico ──────────────────
+    if (report_due) {
         _enqueue(PUB_KIND_REPORT, control_id, param->param_id, value, 0, NULL);
-        
-        ESP_LOGW(TAG, "report due for param_id=%d (sampling=%d s)",
-                param->param_id, param->sampling);
+        ESP_LOGI(TAG,
+            "REPORT param_id=%d | cycle_s=%" PRId64 "s | sampling=%ds"
+            " | forced_read=%s",
+            param->param_id, ctx->cycle_s, param->sampling,
+            read_due ? "no" : "YES");
     }
-    
-    // ── 4c. Actualizar campos de runtime (mutable) ────────────
+
+    // ── 5c. Actualizar campos de runtime (mutable) ────────────
     kx_param_t *mp = kx_param_store_get_param_mutable(control_id, param->param_id);
     if (mp) {
         mp->ts_last_read         = now_ms;
@@ -468,9 +453,7 @@ static void _modbus_task(void *arg)
              kx_param_store_count());
     vTaskDelay(pdMS_TO_TICKS(4000));
 
-    // cycle_s avanza en múltiplos del intervalo base.
-    // Empieza en 0 para que el primer ciclo publique status
-    int64_t cycle_s = 0;
+    int64_t cycle_s = 5;
 
     while (s_running) {
 
@@ -508,17 +491,13 @@ static void _modbus_task(void *arg)
             .cycle_s   = cycle_s,
         };
 
-        ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        ESP_LOGI(TAG, "poll cycle_s=%" PRId64 " | %d controls | %d readable | heap=%" PRIu32,
-                 cycle_s, kx_param_store_count(), ctx.total, kx_system_heap_free());
+        KX_LOG_CYCLE_START(TAG, cycle_s, kx_param_store_count(), ctx.total);
 
         kx_param_store_foreach(_poll_param, &ctx);
 
         xSemaphoreGive(s_foreach_mutex);
 
-        ESP_LOGI(TAG, "poll done: read=%d errors=%d skipped=%d unchanged=%d | heap=%" PRIu32,
-                 ctx.ok, ctx.errors, ctx.skipped, ctx.unchanged, kx_system_heap_free());
-        ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        KX_LOG_CYCLE_END(TAG, ctx.ok, ctx.errors, ctx.skipped, ctx.unchanged);
 
         // Avanzar el contador de segundos de ciclo
         cycle_s = (cycle_s + KX_TELEMETRY_INTERVAL_S) % 60;

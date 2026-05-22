@@ -72,3 +72,19 @@
 
 // ── Firmware version ──────────────────────────────────────────
 #define KX_FW_VERSION  "0.2.0"
+
+// En kx_config.h — añade macros de log estructurado
+#define KX_LOG_PHASE(tag, phase, fmt, ...) \
+    ESP_LOGI(tag, "[%-12s] " fmt, phase, ##__VA_ARGS__)
+
+#define KX_LOG_CYCLE_START(tag, cycle, controls, readable) \
+    ESP_LOGI(tag, \
+        "\n┌─[CYCLE %-3" PRId64 "]──────────────────────────────┐\n" \
+        "│  controls=%-3d  readable=%-3d  heap=%-8" PRIu32 "│", \
+        cycle, controls, readable, kx_system_heap_free())
+
+#define KX_LOG_CYCLE_END(tag, read, err, skip, nochange) \
+    ESP_LOGI(tag, \
+        "│  read=%-4d err=%-4d skip=%-4d nochange=%-4d  │\n" \
+        "└────────────────────────────────────────────────┘", \
+        read, err, skip, nochange)
