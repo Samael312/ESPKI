@@ -13,4 +13,6 @@ idf_component_register(
         esp_netif
         esp_event
         lwip
+    PRIV_REQUIRES
+        json
 )

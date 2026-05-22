@@ -20,7 +20,14 @@ esp_err_t kx_modbus_read_one(int control_id, int param_id);
 esp_err_t kx_modbus_write_one(int control_id, int param_id, float value);
 
 // Llamar al recibir quiiot/{uuid}/entities/get.
-// Activa un ciclo de polling completo (todos los params) y publica
-// status de cada uno. Si no llega ningún get en KX_DEMAND_TIMEOUT_S
-// segundos, el polling se detiene hasta el siguiente get.
-void kx_modbus_request_poll(void);
+//
+// param_id > 0 → leer y publicar SOLO ese parámetro.
+//               Si la misma petición se repite antes de
+//               KX_DEMAND_REPEAT_MS ms, se re-encola con un
+//               pequeño jitter para evitar que varias lleguen
+//               al bus a la vez.
+//
+// param_id == 0 → ciclo completo (todos los params visibles).
+//
+// Las demandas se encolan; el _modbus_task las consume en orden.
+void kx_modbus_request_poll(int param_id);

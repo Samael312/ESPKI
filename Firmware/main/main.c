@@ -5,6 +5,7 @@
 #include "kx_telemetry.h"
 #include "kx_modbus_master.h"
 #include "kx_param_store.h"
+#include "cJSON.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -118,27 +119,40 @@ static bool _topic_last_segment_ends_with_set(const char *topic)
     return (slen >= 4 && strcmp(seg + slen - 3, "set") == 0);
 }
 
-// ── Router de mensajes MQTT entrantes ─────────────────────────
+// ── Extrae el param_id del payload de entities/get ───────────
 //
-// Orden de evaluación (primero gana):
-//
-//  1. quiiot/{uuid}/entities/{id}set  → kx_param_handle_set()
-//     Órdenes de escritura desde la plataforma.
-//
-//  2. quiiot/{uuid}/entities/get      → kx_modbus_request_poll()
-//     El frontend está en pantalla y pide lectura de todos los
-//     parámetros. Activa un ciclo Modbus completo + pub_status.
-//
-//  3. quiiot/{uuid}/entities/*        → ignorar (cualquier otro
-//     sub-topic de entities que no sea set ni get).
-//
-//  4. +/{uuid}/controls/*             → kx_config_handle()
-//
-//  5. +/{uuid}                        → kx_config_handle()
-//
-//  6. Cualquier otro                  → warning y descartar.
-//
+// Payload esperado: {"id": 7748309, "operation": "get"}
+// Devuelve el id numérico, o 0 si no se puede parsear.
+// payload puede no estar null-terminated, se usa len.
 // ─────────────────────────────────────────────────────────────
+static int _parse_get_param_id(const char *payload, size_t len)
+{
+    if (!payload || len == 0) return 0;
+ 
+    cJSON *root = cJSON_ParseWithLength(payload, len);
+    if (!root) {
+        ESP_LOGW(TAG, "get payload: JSON parse failed (%.40s)", payload);
+        return 0;
+    }
+ 
+    // Normalizar: si es array, tomar el primer elemento
+    cJSON *obj = cJSON_IsArray(root) ? cJSON_GetArrayItem(root, 0) : root;
+ 
+    int param_id = 0;
+    if (obj) {
+        cJSON *id_item = cJSON_GetObjectItem(obj, "id");
+        if (id_item && cJSON_IsNumber(id_item)) {
+            param_id = id_item->valueint;
+        } else {
+            ESP_LOGW(TAG, "get payload: no numeric 'id' field in: %.60s", payload);
+        }
+    }
+ 
+    cJSON_Delete(root);
+    return param_id;
+}
+
+// ── Router de mensajes MQTT entrantes ─────────────────────────
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
     ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
@@ -152,13 +166,14 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
             kx_param_handle_set(topic, payload, len);
 
         } else {
-            // Bloque 2: get → activar ciclo de poll
-            // Bloque 3: cualquier otro sub-topic → ignorar
             const char *last_slash = strrchr(topic, '/');
             if (last_slash && strcmp(last_slash + 1, "get") == 0) {
-                ESP_LOGI(TAG, "entities/get received — requesting Modbus poll");
-                kx_modbus_request_poll();
+                // Bloque 2: get → polling del param pedido (o ciclo completo si id=0)
+                int param_id = _parse_get_param_id(payload, len);
+                ESP_LOGI(TAG, "entities/get param_id=%d", param_id);
+                kx_modbus_request_poll(param_id);
             } else {
+                // Bloque 3: otro sub-topic → ignorar
                 ESP_LOGD(TAG, "entities topic ignorado: %s", topic);
             }
         }
