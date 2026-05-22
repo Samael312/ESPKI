@@ -18,3 +18,9 @@ void      kx_modbus_resume(void);
 // Lectura puntual bajo demanda.
 esp_err_t kx_modbus_read_one(int control_id, int param_id);
 esp_err_t kx_modbus_write_one(int control_id, int param_id, float value);
+
+// Llamar al recibir quiiot/{uuid}/entities/get.
+// Activa un ciclo de polling completo (todos los params) y publica
+// status de cada uno. Si no llega ningún get en KX_DEMAND_TIMEOUT_S
+// segundos, el polling se detiene hasta el siguiente get.
+void kx_modbus_request_poll(void);

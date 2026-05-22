@@ -309,21 +309,6 @@ static void _mqtt_event_handler(void *arg, esp_event_base_t base,
     case MQTT_EVENT_DATA:
 
         if (ev->topic_len > 0) {
-
-                // ── Filtro temprano: descartar topics ignorados ─────
-            // entities/get es un retained del broker, no tiene acción.
-            size_t tlen_check = ev->topic_len < sizeof(s_rx_topic) - 1
-                            ? ev->topic_len : sizeof(s_rx_topic) - 1;
-            char topic_check[sizeof(s_rx_topic)];
-            memcpy(topic_check, ev->topic, tlen_check);
-            topic_check[tlen_check] = '\0';
-
-            // Si el último segmento es literalmente "get", descartar
-            const char *last_sl = strrchr(topic_check, '/');
-            if (last_sl && strcmp(last_sl + 1, "get") == 0) {
-                ESP_LOGD(TAG, "early discard: %s", topic_check);
-                break;   // no asignar buffer, no encolar
-            }
             
             _wait_backpressure();
 

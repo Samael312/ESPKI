@@ -27,6 +27,9 @@
 // ── Telemetría ────────────────────────────────────────────────
 #define KX_TELEMETRY_INTERVAL_S  5
 
+// ── Polling bajo demanda ──────────────────────────────────────
+#define KX_DEMAND_TIMEOUT_S      10
+
 // ── Tareas FreeRTOS ───────────────────────────────────────────
 #define KX_TASK_STACK_NET         4096
 #define KX_TASK_STACK_MQTT        16384

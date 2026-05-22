@@ -55,52 +55,69 @@ static const char *TAG = "kx_modbus";
 
 // =============================================================
 // Pipeline: cola de resultados lectura → publicación
-//
-// El task de lectura Modbus escribe en s_pub_queue.
-// El task publisher consume la cola y llama a kx_mqtt_publish.
-// Así el bus RS-485 nunca espera al broker MQTT.
 // =============================================================
-#define PUB_QUEUE_SIZE   64    // slots: suficiente para un ciclo completo
+#define PUB_QUEUE_SIZE   64
 
 typedef enum {
-    PUB_KIND_STATUS,   // kx_param_pub_status  — solo si cambia
-    PUB_KIND_REPORT,   // kx_param_pub_report  — por sampling
-    PUB_KIND_ERROR,    // kx_param_pub_error
+    PUB_KIND_STATUS,
+    PUB_KIND_REPORT,
+    PUB_KIND_ERROR,
 } kx_pub_kind_t;
 
 typedef struct {
     kx_pub_kind_t kind;
     int           control_id;
     int           param_id;
-    uint16_t      reg;         // solo para ERROR
+    uint16_t      reg;
     float         value;
-    char          error_msg[32]; // solo para ERROR
+    char          error_msg[32];
 } kx_pub_result_t;
 
 static QueueHandle_t s_pub_queue = NULL;
 
 // =============================================================
-// Umbral de cambio para publicación en "status"
-//
-// Se considera "cambio" si:
-//   |value - last_published_value| > KX_STATUS_DELTA_ABS
-//   O bien  |delta / last_published_value| > KX_STATUS_DELTA_REL
-//
-// El umbral absoluto evita publicaciones por ruido en valores
-// cercanos a cero donde el relativo explotaría.
+// Umbral de cambio para pub_report (no aplica a status bajo demanda)
 // =============================================================
-#define KX_STATUS_DELTA_ABS   0.5f   // ±0.5 unidades
-#define KX_STATUS_DELTA_REL   0.01f  // 1% de cambio relativo
+#define KX_STATUS_DELTA_ABS   0.5f
+#define KX_STATUS_DELTA_REL   0.01f
 
 // =============================================================
 // Sincronización Modbus
+//
+// POLL_ALLOWED_BIT — pause/resume (existente)
+// DEMAND_BIT       — señal de que llegó un get del frontend
 // =============================================================
 #define POLL_ALLOWED_BIT   BIT0
+#define DEMAND_BIT         BIT1
 
 static EventGroupHandle_t  s_poll_eg       = NULL;
 static SemaphoreHandle_t   s_foreach_mutex = NULL;
 static volatile bool       s_running       = false;
 static TaskHandle_t        s_task          = NULL;
+
+// Timestamp (ms) del último get recibido. 0 = nunca.
+// Escrito desde la tarea MQTT, leído desde _modbus_task.
+// En ESP32 las escrituras a int64_t alineadas son atómicas en la
+// práctica, pero usamos volatile para evitar optimizaciones del
+// compilador. Si en el futuro se necesita garantía estricta,
+// proteger con un spinlock.
+static volatile int64_t s_last_demand_ms = 0;
+
+// =============================================================
+// API pública — demanda de polling
+//
+// Llamada desde main.c al recibir quiiot/{uuid}/entities/get.
+// Registra el timestamp y despierta al _modbus_task para que
+// ejecute un ciclo completo de lecturas + pub_status.
+// =============================================================
+void kx_modbus_request_poll(void)
+{
+    s_last_demand_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
+    if (s_poll_eg) {
+        xEventGroupSetBits(s_poll_eg, DEMAND_BIT);
+    }
+    ESP_LOGI(TAG, "poll demand received (ts=%" PRId64 "ms)", s_last_demand_ms);
+}
 
 // =============================================================
 // CRC16 Modbus
@@ -239,12 +256,9 @@ static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
 // =============================================================
 // Helpers de decisión de publicación
 // =============================================================
-
-// Devuelve true si el valor ha cambiado suficiente para publicar
-// en "status". Se usa doble umbral: absoluto y relativo.
 static inline bool _has_changed(float new_val, float last_val)
 {
-    if (last_val == FLT_MAX) return true;   // primera lectura: siempre publicar
+    if (last_val == FLT_MAX) return true;
     float delta = fabsf(new_val - last_val);
     if (delta > KX_STATUS_DELTA_ABS) return true;
     if (last_val != 0.0f && (delta / fabsf(last_val)) > KX_STATUS_DELTA_REL) return true;
@@ -259,9 +273,10 @@ typedef struct {
     int     done;
     int     ok;
     int     errors;
-    int     skipped;    // parámetros saltados por sampling
-    int     unchanged;  // leídos pero no publicados en status (sin cambio)
-    int64_t cycle_s;    // segundo de ciclo para la lógica de sampling
+    int     skipped;
+    int     unchanged;  // solo aplica a report (status siempre se publica bajo demanda)
+    int64_t cycle_s;
+    bool    demand_active; // true = hay usuario en pantalla → pub_status siempre
 } _poll_ctx_t;
 
 typedef struct { int count; } _count_ctx_t;
@@ -302,11 +317,34 @@ static void _enqueue(kx_pub_kind_t kind, int ctrl_id, int param_id,
     }
 
     if (xQueueSend(s_pub_queue, &r, 0) != pdTRUE) {
-        // Cola llena: el publisher va retrasado. No bloqueamos el bus.
         ESP_LOGW(TAG, "pub_queue full, dropping param_id=%d", param_id);
     }
 }
 
+// =============================================================
+// Callback de iteración — poll de un parámetro
+//
+// Cambios respecto a la versión anterior:
+//
+//   · status bajo demanda (demand_active == true):
+//       Se publica SIEMPRE, independientemente de si el valor cambió.
+//       El frontend lo pidió explícitamente con el get.
+//
+//   · status sin demanda (demand_active == false):
+//       No se publica; este ciclo es solo para report periódico
+//       y actualización de ts_last_read. En la práctica, si no
+//       hay demanda el _modbus_task no ejecuta el foreach, así que
+//       esta rama es de seguridad.
+//
+//   · report:
+//       Sigue rigiéndose por sampling, sin cambios.
+//       Solo publica si _has_changed() para evitar flood.
+//
+//   · skip por sampling:
+//       Bajo demanda, el skip se desactiva: si el usuario está
+//       en pantalla necesita ver todos los valores ahora.
+//       Sin demanda, el skip se mantiene para no saturar el bus.
+// =============================================================
 static void _poll_param(int control_id, const kx_param_t *param, void *user_data)
 {
     _poll_ctx_t *ctx = (_poll_ctx_t *)user_data;
@@ -327,39 +365,36 @@ static void _poll_param(int control_id, const kx_param_t *param, void *user_data
     int64_t now_ms      = (int64_t)(esp_timer_get_time() / 1000ULL);
     int     sampling_ms = (param->sampling > 0 ? param->sampling : 60) * 1000;
 
-    // ── 1. Decidir antes del skip si toca report ──────────────
-    // report_due se evalúa SIEMPRE, independientemente de ts_last_read.
-    // Si el ciclo actual es múltiplo del sampling, forzamos lectura
-    // aunque ts_last_read diga que aún no toca.
+    // ── Report: se evalúa siempre, independiente de demanda ──
     bool report_due = (param->sampling > 0) &&
                       (ctx->cycle_s % (int64_t)param->sampling == 0);
 
-    // ── 2. ¿Toca leer por ts? ─────────────────────────────────
-    bool read_due = (param->ts_last_read == 0) ||
+    // ── Skip por sampling ─────────────────────────────────────
+    // Bajo demanda activa: leer siempre (el usuario está esperando
+    // los valores en pantalla).
+    // Sin demanda: respetar el sampling para no saturar el bus.
+    bool read_due = ctx->demand_active ||
+                    (param->ts_last_read == 0) ||
                     ((now_ms - param->ts_last_read) >= (int64_t)sampling_ms);
 
-    // Si no toca ni leer ni reportar → skip
     if (!read_due && !report_due) {
         ctx->skipped++;
         ESP_LOGD(TAG,
             "skip param_id=%d | cycle_s=%" PRId64 "s | sampling=%ds"
-            " | elapsed=%" PRId64 "ms | rem=%" PRId64,
+            " | elapsed=%" PRId64 "ms",
             param->param_id, ctx->cycle_s, param->sampling,
-            now_ms - param->ts_last_read,
-            (param->sampling > 0
-                ? ctx->cycle_s % (int64_t)param->sampling
-                : (int64_t)-1));
+            now_ms - param->ts_last_read);
         return;
     }
 
-    // ── 3. Leer por Modbus ────────────────────────────────────
+    // ── Leer por Modbus ───────────────────────────────────────
     float value = _read_register((uint8_t)ctrl->slave_addr,
                                   (uint16_t)param->reg, fc_read, param);
 
     ctx->done++;
     _print_progress(control_id, ctx->done, ctx->total);
 
-    // ── 4. Error de lectura ───────────────────────────────────
+    // ── Error de lectura ──────────────────────────────────────
     if (value == -FLT_MAX) {
         _enqueue(PUB_KIND_ERROR, control_id, param->param_id,
                  0.0f, (uint16_t)param->reg, "modbus_timeout");
@@ -370,25 +405,25 @@ static void _poll_param(int control_id, const kx_param_t *param, void *user_data
 
     ctx->ok++;
 
-    // ── 5a. STATUS — solo si el valor ha cambiado ─────────────
-    if (_has_changed(value, param->last_published_value)) {
-        _enqueue(PUB_KIND_STATUS, control_id, param->param_id,
-                 value, 0, NULL);
+    // ── STATUS ────────────────────────────────────────────────
+    // Bajo demanda: publicar siempre (el frontend espera el valor).
+    // Sin demanda:  no publicar (nadie lo está viendo).
+    if (ctx->demand_active) {
+        _enqueue(PUB_KIND_STATUS, control_id, param->param_id, value, 0, NULL);
     } else {
         ctx->unchanged++;
     }
 
-    // ── 5b. REPORT — con log de diagnóstico ──────────────────
-    if (report_due) {
+    // ── REPORT ────────────────────────────────────────────────
+    // Periódico por sampling, solo si el valor cambió.
+    if (report_due && _has_changed(value, param->last_published_value)) {
         _enqueue(PUB_KIND_REPORT, control_id, param->param_id, value, 0, NULL);
         ESP_LOGI(TAG,
-            "REPORT param_id=%d | cycle_s=%" PRId64 "s | sampling=%ds"
-            " | forced_read=%s",
-            param->param_id, ctx->cycle_s, param->sampling,
-            read_due ? "no" : "YES");
+            "REPORT param_id=%d | cycle_s=%" PRId64 "s | sampling=%ds",
+            param->param_id, ctx->cycle_s, param->sampling);
     }
 
-    // ── 5c. Actualizar campos de runtime (mutable) ────────────
+    // ── Actualizar campos de runtime ──────────────────────────
     kx_param_t *mp = kx_param_store_get_param_mutable(control_id, param->param_id);
     if (mp) {
         mp->ts_last_read         = now_ms;
@@ -398,7 +433,7 @@ static void _poll_param(int control_id, const kx_param_t *param, void *user_data
     vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_PARAM_MS));
 }
 
-// Contador de parámetros legibles (para inicializar ctx->total)
+// Contador de parámetros legibles
 static void _count_readable(int control_id, const kx_param_t *param, void *user_data)
 {
     _count_ctx_t *c = (_count_ctx_t *)user_data;
@@ -411,10 +446,6 @@ static void _count_readable(int control_id, const kx_param_t *param, void *user_
 
 // =============================================================
 // Tarea publisher
-//
-// Consume s_pub_queue y llama a las funciones de telemetría.
-// Separada del bus Modbus para que un broker lento no ralentice
-// las lecturas RS-485.
 // =============================================================
 static void _publisher_task(void *arg)
 {
@@ -440,6 +471,26 @@ static void _publisher_task(void *arg)
 
 // =============================================================
 // Tarea principal Modbus
+//
+// Flujo bajo demanda:
+//
+//   1. Espera DEMAND_BIT (bloqueante, sin timeout).
+//      El bit lo setea kx_modbus_request_poll() al llegar el get.
+//      Se limpia automáticamente al despertar (pdTRUE).
+//
+//   2. Comprueba si la demanda sigue vigente:
+//      ¿hace menos de KX_DEMAND_TIMEOUT_S que llegó el último get?
+//        · SÍ → ejecutar ciclo completo con demand_active=true
+//        · NO → alguien disparó el bit pero ya expiró (raro), skip
+//
+//   3. Comprueba también si toca report periódico (cycle_s).
+//      Si ningún param tiene report_due y no hay demanda, el ciclo
+//      es vacío y no toca el bus RS-485.
+//
+//   Nota: el report periódico NO despierta este task por sí solo.
+//   Se ejecuta dentro del mismo ciclo que el get. Si nadie abre
+//   el frontend, el report no se publicará (diseño intencionado:
+//   cambiar a un timer separado si se quiere report autónomo).
 // =============================================================
 static void _modbus_task(void *arg)
 {
@@ -449,46 +500,61 @@ static void _modbus_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
-    ESP_LOGI(TAG, "entities ready (%d controls) — starting Modbus polling",
+    ESP_LOGI(TAG, "entities ready (%d controls) — waiting for poll demand",
              kx_param_store_count());
-    vTaskDelay(pdMS_TO_TICKS(4000));
 
     int64_t cycle_s = 5;
 
     while (s_running) {
 
+        // ── Esperar señal de demanda (get del frontend) ───────
+        xEventGroupWaitBits(s_poll_eg,
+                            DEMAND_BIT,
+                            pdTRUE,        // auto-clear al despertar
+                            pdTRUE,
+                            portMAX_DELAY);
+
+        // ── Verificar que la demanda no haya expirado ─────────
+        int64_t now_ms   = (int64_t)(esp_timer_get_time() / 1000ULL);
+        int64_t age_ms   = now_ms - s_last_demand_ms;
+        bool demand_active = (s_last_demand_ms > 0) &&
+                             (age_ms < (int64_t)(KX_DEMAND_TIMEOUT_S * 1000));
+
+        if (!demand_active) {
+            ESP_LOGD(TAG, "demand expired (age=%" PRId64 "ms) — skip cycle", age_ms);
+            continue;
+        }
+
+        // ── Verificar prerequisitos ───────────────────────────
+        if (!kx_mqtt_is_connected() || !kx_param_store_is_ready()) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
+        // ── Tomar mutex (respeta pause/resume) ────────────────
         xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
                             pdFALSE, pdTRUE, portMAX_DELAY);
-
-        if (!kx_mqtt_is_connected()) {
-            vTaskDelay(pdMS_TO_TICKS(KX_TELEMETRY_INTERVAL_S * 1000));
-            continue;
-        }
-
-        if (!kx_param_store_is_ready()) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-            continue;
-        }
 
         xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
 
         if (!s_running || !kx_param_store_is_ready()) {
             xSemaphoreGive(s_foreach_mutex);
-            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
+        // ── Ciclo de poll ─────────────────────────────────────
         _count_ctx_t cc = { .count = 0 };
         kx_param_store_foreach(_count_readable, &cc);
 
         _poll_ctx_t ctx = {
-            .total     = cc.count,
-            .done      = 0,
-            .ok        = 0,
-            .errors    = 0,
-            .skipped   = 0,
-            .unchanged = 0,
-            .cycle_s   = cycle_s,
+            .total         = cc.count,
+            .done          = 0,
+            .ok            = 0,
+            .errors        = 0,
+            .skipped       = 0,
+            .unchanged     = 0,
+            .cycle_s       = cycle_s,
+            .demand_active = demand_active,
         };
 
         KX_LOG_CYCLE_START(TAG, cycle_s, kx_param_store_count(), ctx.total);
@@ -499,10 +565,8 @@ static void _modbus_task(void *arg)
 
         KX_LOG_CYCLE_END(TAG, ctx.ok, ctx.errors, ctx.skipped, ctx.unchanged);
 
-        // Avanzar el contador de segundos de ciclo
+        // Avanzar contador de ciclo para la lógica de sampling
         cycle_s = (cycle_s + KX_TELEMETRY_INTERVAL_S) % 60;
-
-        vTaskDelay(pdMS_TO_TICKS(KX_TELEMETRY_INTERVAL_S * 1000));
     }
 
     uart_driver_delete(KX_MODBUS_UART_NUM);
@@ -511,7 +575,7 @@ static void _modbus_task(void *arg)
 }
 
 // =============================================================
-// pause / resume  (sin cambios respecto al original)
+// pause / resume
 // =============================================================
 void kx_modbus_pause(void)
 {
@@ -542,7 +606,6 @@ esp_err_t kx_modbus_master_start(void)
 {
     if (s_running) { ESP_LOGW(TAG, "already running"); return ESP_OK; }
 
-    // Cola pipeline lectura → publicación
     s_pub_queue = xQueueCreate(PUB_QUEUE_SIZE, sizeof(kx_pub_result_t));
     if (!s_pub_queue) {
         ESP_LOGE(TAG, "failed to create pub_queue");
@@ -555,12 +618,13 @@ esp_err_t kx_modbus_master_start(void)
     s_foreach_mutex = xSemaphoreCreateMutex();
     if (!s_foreach_mutex) { ESP_LOGE(TAG, "failed to create mutex"); return ESP_FAIL; }
 
+    // POLL_ALLOWED_BIT siempre activo al arrancar; DEMAND_BIT apagado
+    // (el task dormirá hasta el primer get del frontend).
     xEventGroupSetBits(s_poll_eg, POLL_ALLOWED_BIT);
 
     esp_err_t err = _uart_init();
     if (err != ESP_OK) { ESP_LOGE(TAG, "UART init failed: %s", esp_err_to_name(err)); return err; }
 
-    // Tarea publisher (prioridad baja: cede ante lectura Modbus)
     BaseType_t ret = xTaskCreate(_publisher_task, "kx_publisher", 4096, NULL,
                                   KX_TASK_PRIO_TELEMETRY - 1, NULL);
     if (ret != pdPASS) {
@@ -582,7 +646,6 @@ bool kx_modbus_master_is_running(void) { return s_running; }
 
 // =============================================================
 // kx_modbus_read_one  (lectura puntual bajo demanda)
-// Publica directamente (no usa pipeline) para respuesta síncrona.
 // =============================================================
 esp_err_t kx_modbus_read_one(int control_id, int param_id)
 {

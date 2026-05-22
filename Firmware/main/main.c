@@ -112,10 +112,9 @@ static bool _topic_last_segment_ends_with_set(const char *topic)
     const char *last_slash = strrchr(topic, '/');
     if (!last_slash) return false;
 
-    const char *seg  = last_slash + 1;   // p.ej. "7748348set" o "get"
+    const char *seg  = last_slash + 1;
     size_t      slen = strlen(seg);
 
-    // Mínimo "1set" (4 chars): al menos un dígito + "set"
     return (slen >= 4 && strcmp(seg + slen - 3, "set") == 0);
 }
 
@@ -126,25 +125,19 @@ static bool _topic_last_segment_ends_with_set(const char *topic)
 //  1. quiiot/{uuid}/entities/{id}set  → kx_param_handle_set()
 //     Órdenes de escritura desde la plataforma.
 //
-//  2. quiiot/{uuid}/entities/get      → ignorar silenciosamente.
-//     El topic "get" es retained y llega con cada reconexión;
-//     no tiene acción en el dispositivo.
+//  2. quiiot/{uuid}/entities/get      → kx_modbus_request_poll()
+//     El frontend está en pantalla y pide lectura de todos los
+//     parámetros. Activa un ciclo Modbus completo + pub_status.
 //
 //  3. quiiot/{uuid}/entities/*        → ignorar (cualquier otro
 //     sub-topic de entities que no sea set ni get).
 //
 //  4. +/{uuid}/controls/*             → kx_config_handle()
-//     Configuración: device, controls, entities de control.
 //
 //  5. +/{uuid}                        → kx_config_handle()
-//     Device JSON inicial.
 //
 //  6. Cualquier otro                  → warning y descartar.
 //
-// IMPORTANTE: los bloques 1-3 consumen todos los topics que
-// contienen "/entities/" bajo "quiiot/", evitando que lleguen
-// a kx_config_handle y generen el warning "could not extract
-// control_id".
 // ─────────────────────────────────────────────────────────────
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
@@ -155,15 +148,24 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
     if (_is_quiiot_entities_topic(topic)) {
 
         if (_topic_last_segment_ends_with_set(topic)) {
-            // Bloque 1: orden de escritura — procesar
+            // Bloque 1: orden de escritura
             kx_param_handle_set(topic, payload, len);
+
         } else {
-            // Bloque 2-3: "get" u otros — ignorar silenciosamente
-            ESP_LOGD(TAG, "entities topic ignorado: %s", topic);
+            // Bloque 2: get → activar ciclo de poll
+            // Bloque 3: cualquier otro sub-topic → ignorar
+            const char *last_slash = strrchr(topic, '/');
+            if (last_slash && strcmp(last_slash + 1, "get") == 0) {
+                ESP_LOGI(TAG, "entities/get received — requesting Modbus poll");
+                kx_modbus_request_poll();
+            } else {
+                ESP_LOGD(TAG, "entities topic ignorado: %s", topic);
+            }
         }
         return;
     }
 
+    // ── Bloque 4: configuración de controles ──────────────────
     if (strstr(topic, "/controls")) {
         kx_config_handle(topic, payload, len);
         return;
