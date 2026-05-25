@@ -82,7 +82,7 @@ esp_err_t kx_system_init(void)
     _load_boot_count();
 
     ESP_LOGI(TAG, "================================================");
-    ESP_LOGI(TAG, "  Kiconex Box Lite — FW %s", "0.1.0");
+    ESP_LOGI(TAG, "  Kiconex Box Lite — FW %s", "0.2.0");
     ESP_LOGI(TAG, "  Device ID : %s", s_device_id);
     ESP_LOGI(TAG, "  Boot count: %" PRIu32, s_boot_count);
     ESP_LOGI(TAG, "  Reset reason: %s", _reset_reason_str());

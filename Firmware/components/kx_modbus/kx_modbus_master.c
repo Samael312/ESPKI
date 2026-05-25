@@ -40,10 +40,10 @@ static const char *TAG = "kx_modbus";
 #define KX_MODBUS_RTS_PIN    -1
 #endif
 
-#define MODBUS_RESPONSE_TIMEOUT_MS    50
-#define MODBUS_INTER_FRAME_MS         20
-#define MODBUS_INTER_PARAM_MS         10
-#define MODBUS_RETRY_COUNT             2
+#define MODBUS_RESPONSE_TIMEOUT_MS    100
+#define MODBUS_INTER_FRAME_MS          20
+#define MODBUS_INTER_PARAM_MS          10
+#define MODBUS_RETRY_COUNT              2
 
 #define MB_FC_READ_COILS           0x01
 #define MB_FC_READ_DISCRETE        0x02
@@ -77,27 +77,22 @@ static QueueHandle_t s_pub_queue = NULL;
 
 // =============================================================
 // Cola de demandas de poll
-//
-// Cada get del frontend encola un kx_poll_demand_t.
-//   param_id > 0  → leer y publicar solo ese parámetro.
-//   param_id == 0 → ciclo completo (todos los params visibles).
-//
-// Si el mismo param_id llega mientras su entrada todavía está
-// al frente de la cola (edad < KX_DEMAND_REPEAT_MS), se descarta
-// el duplicado para no saturar el bus.
-//
-// Entre demandas consecutivas se inserta un delay de 50 ms para
-// que los gets que llegan en ráfaga no colisionen en el bus.
 // =============================================================
 #ifndef KX_DEMAND_REPEAT_MS
-#define KX_DEMAND_REPEAT_MS  5000   // ventana de deduplicación (ms)
+#define KX_DEMAND_REPEAT_MS  5000
 #endif
 
-#define DEMAND_QUEUE_SIZE   16
+#define DEMAND_QUEUE_SIZE   300
+#define BATCH_THRESHOLD      15
+
+// Tiempo máximo esperando que la ráfaga de gets termine de llegar
+// antes de empezar a procesar (en ticks de 100 ms).
+#define BURST_WAIT_MAX_TICKS  20   // 2 s máximo
+#define BURST_STABLE_TICKS     2   // 2 ticks sin cambio → estable
 
 typedef struct {
-    int     param_id;       // 0 = todos
-    int64_t enqueued_ms;    // timestamp de encolado (ms)
+    int     param_id;
+    int64_t enqueued_ms;
 } kx_poll_demand_t;
 
 static QueueHandle_t s_demand_queue = NULL;
@@ -131,9 +126,7 @@ void kx_modbus_request_poll(int param_id)
     int64_t now_ms   = (int64_t)(esp_timer_get_time() / 1000ULL);
     s_last_demand_ms = now_ms;
 
-    // ── Deduplicar: si el frente de la cola es el mismo param
-    //    y fue encolado hace menos de KX_DEMAND_REPEAT_MS ms,
-    //    descartar la nueva petición. ──────────────────────────
+    // Deduplicar: mismo param_id en el frente de la cola < 5 s → descartar
     kx_poll_demand_t peek;
     if (xQueuePeek(s_demand_queue, &peek, 0) == pdTRUE) {
         if (peek.param_id == param_id &&
@@ -152,7 +145,6 @@ void kx_modbus_request_poll(int param_id)
         return;
     }
 
-    // Despertar al _modbus_task
     if (s_poll_eg) xEventGroupSetBits(s_poll_eg, DEMAND_BIT);
 
     ESP_LOGI(TAG, "poll demand enqueued param_id=%d ts=%" PRId64 "ms",
@@ -321,14 +313,13 @@ typedef struct {
 
 typedef struct { int count; } _count_ctx_t;
 
-// Contexto para buscar el control_id dueño de un param_id
 typedef struct {
     int target_param_id;
     int found_ctrl_id;
 } _find_ctrl_ctx_t;
 
 // =============================================================
-// Barra de progreso ASCII
+// Barra de progreso ASCII — ciclo completo
 // =============================================================
 #define POLL_BAR_WIDTH 30
 
@@ -340,9 +331,13 @@ static void _print_progress(int control_id, int done, int total)
     char bar[POLL_BAR_WIDTH + 1];
     for (int i = 0; i < POLL_BAR_WIDTH; i++) bar[i] = (i < fill) ? '#' : '-';
     bar[POLL_BAR_WIDTH] = '\0';
-    printf("[poll] ctrl=%d [%s] %3d%% (%d/%d params)\r", control_id, bar, pct, done, total);
+    printf("[poll] ctrl=%d [%s] %3d%% (%d/%d params)\r",
+           control_id, bar, pct, done, total);
     fflush(stdout);
-    if (pct == 25 || pct == 50 || pct == 75 || pct == 100) { printf("\n"); fflush(stdout); }
+    if (pct == 25 || pct == 50 || pct == 75 || pct == 100) {
+        printf("\n");
+        fflush(stdout);
+    }
 }
 
 // =============================================================
@@ -358,13 +353,10 @@ static void _enqueue(kx_pub_kind_t kind, int ctrl_id, int param_id,
         .reg        = reg,
         .value      = value,
     };
-    if (errmsg) {
-        snprintf(r.error_msg, sizeof(r.error_msg), "%s", errmsg);
-    }
+    if (errmsg) snprintf(r.error_msg, sizeof(r.error_msg), "%s", errmsg);
 
-    if (xQueueSend(s_pub_queue, &r, 0) != pdTRUE) {
+    if (xQueueSend(s_pub_queue, &r, 0) != pdTRUE)
         ESP_LOGW(TAG, "pub_queue full, dropping param_id=%d", param_id);
-    }
 }
 
 // =============================================================
@@ -456,13 +448,12 @@ static void _count_readable(int control_id, const kx_param_t *param, void *user_
         fc == MB_FC_READ_HOLDING_REGS || fc == MB_FC_READ_INPUT_REGS) c->count++;
 }
 
-// Callback auxiliar: encontrar el control_id que contiene un param_id
+// Callback auxiliar: encontrar el control_id dueño de un param_id
 static void _find_ctrl_cb(int ctrl_id, const kx_param_t *param, void *user_data)
 {
     _find_ctrl_ctx_t *ctx = (_find_ctrl_ctx_t *)user_data;
-    if (ctx->found_ctrl_id < 0 && param->param_id == ctx->target_param_id) {
+    if (ctx->found_ctrl_id < 0 && param->param_id == ctx->target_param_id)
         ctx->found_ctrl_id = ctrl_id;
-    }
 }
 
 // =============================================================
@@ -470,7 +461,6 @@ static void _find_ctrl_cb(int ctrl_id, const kx_param_t *param, void *user_data)
 // =============================================================
 static void _poll_single_param(int param_id)
 {
-    // Localizar el control dueño
     _find_ctrl_ctx_t fctx = { .target_param_id = param_id, .found_ctrl_id = -1 };
     kx_param_store_foreach(_find_ctrl_cb, &fctx);
 
@@ -479,8 +469,7 @@ static void _poll_single_param(int param_id)
         return;
     }
 
-    const kx_param_t *param =
-        kx_param_store_get_param(fctx.found_ctrl_id, param_id);
+    const kx_param_t *param = kx_param_store_get_param(fctx.found_ctrl_id, param_id);
     if (!param) return;
 
     const kx_control_params_t *ctrl = kx_param_store_get(fctx.found_ctrl_id);
@@ -550,21 +539,6 @@ static void _publisher_task(void *arg)
 
 // =============================================================
 // Tarea principal Modbus
-//
-// Flujo:
-//   1. Espera DEMAND_BIT (seteado por kx_modbus_request_poll).
-//      El bit NO se borra al despertar (pdFALSE); lo borramos
-//      nosotros después de drenar toda la cola.
-//
-//   2. Drena la cola de demandas en orden FIFO.
-//      Por cada entrada:
-//        · Si caducó (> KX_DEMAND_TIMEOUT_S) → descartar.
-//        · param_id > 0 → _poll_single_param()
-//        · param_id == 0 → ciclo completo con _poll_param()
-//      Entre demandas consecutivas se inserta un delay de 50 ms
-//      para evitar colisiones en el bus RS-485.
-//
-//   3. Cola vacía → borra DEMAND_BIT y vuelve a esperar.
 // =============================================================
 static void _modbus_task(void *arg)
 {
@@ -588,70 +562,152 @@ static void _modbus_task(void *arg)
                             pdTRUE,
                             portMAX_DELAY);
 
+        // ── 1b. Esperar a que la ráfaga termine de llegar ─────
+        // El frontend manda todos los gets en ~1-2 s.
+        // Esperamos hasta que el tamaño de la cola se estabilice
+        // (BURST_STABLE_TICKS ticks consecutivos sin cambio)
+        // o hasta BURST_WAIT_MAX_TICKS × 100 ms como máximo.
+        {
+            int prev  = -1;
+            int stab  = 0;
+            for (int i = 0; i < BURST_WAIT_MAX_TICKS; i++) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                int cur = (int)uxQueueMessagesWaiting(s_demand_queue);
+                if (cur == prev) {
+                    if (++stab >= BURST_STABLE_TICKS) break;
+                } else {
+                    stab = 0;
+                }
+                prev = cur;
+            }
+            ESP_LOGD(TAG, "burst wait done: queue=%d",
+                     (int)uxQueueMessagesWaiting(s_demand_queue));
+        }
+
         // ── 2. Drenar cola ────────────────────────────────────
-        kx_poll_demand_t demand;
+        {
+            int queued      = (int)uxQueueMessagesWaiting(s_demand_queue);
+            bool batch_mode = (queued >= BATCH_THRESHOLD);
 
-        while (xQueueReceive(s_demand_queue, &demand, 0) == pdTRUE) {
+            int batch_total   = queued;
+            int batch_done    = 0;
+            int batch_ok      = 0;
+            int batch_timeout = 0;
+            int batch_skip    = 0;
 
-            // Descartar demandas caducadas
-            int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
-            int64_t age_ms = now_ms - demand.enqueued_ms;
-            if (age_ms > (int64_t)(KX_DEMAND_TIMEOUT_S * 1000)) {
-                ESP_LOGD(TAG, "demand expired param_id=%d age=%" PRId64 "ms — skip",
-                         demand.param_id, age_ms);
-                continue;
+            if (batch_mode) {
+                printf("\n[modbus] batch poll iniciado: %d params\n", batch_total);
+                fflush(stdout);
             }
 
-            // Prerequisitos
-            if (!kx_mqtt_is_connected() || !kx_param_store_is_ready()) {
-                vTaskDelay(pdMS_TO_TICKS(200));
-                continue;
-            }
+            kx_poll_demand_t demand;
 
-            // Respetar pause/resume
-            xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
-                                pdFALSE, pdTRUE, portMAX_DELAY);
+            while (xQueueReceive(s_demand_queue, &demand, 0) == pdTRUE) {
 
-            xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
+                // Descartar demandas caducadas
+                int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
+                int64_t age_ms = now_ms - demand.enqueued_ms;
+                if (age_ms > (int64_t)(KX_DEMAND_TIMEOUT_S * 1000)) {
+                    ESP_LOGD(TAG, "demand expired param_id=%d age=%" PRId64 "ms — skip",
+                             demand.param_id, age_ms);
+                    batch_skip++;
+                    continue;
+                }
 
-            if (!s_running || !kx_param_store_is_ready()) {
+                // Prerequisitos
+                if (!kx_mqtt_is_connected() || !kx_param_store_is_ready()) {
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    continue;
+                }
+
+                // Respetar pause/resume
+                xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
+                                    pdFALSE, pdTRUE, portMAX_DELAY);
+
+                xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
+
+                if (!s_running || !kx_param_store_is_ready()) {
+                    xSemaphoreGive(s_foreach_mutex);
+                    continue;
+                }
+
+                // ── Ejecutar el poll correspondiente ─────────
+                if (demand.param_id > 0) {
+
+                    int pub_before = (int)uxQueueMessagesWaiting(s_pub_queue);
+                    _poll_single_param(demand.param_id);
+                    int pub_after  = (int)uxQueueMessagesWaiting(s_pub_queue);
+
+                    batch_done++;
+                    if (pub_after > pub_before) batch_ok++;
+                    else                        batch_timeout++;
+
+                    if (batch_mode) {
+                        // Recalcular total por si llegaron más demandas
+                        int current_total = batch_done
+                                          + (int)uxQueueMessagesWaiting(s_demand_queue);
+                        int pct  = (batch_done * 100) / current_total;
+                        int fill = (batch_done * POLL_BAR_WIDTH) / current_total;
+                        char bar[POLL_BAR_WIDTH + 1];
+                        for (int i = 0; i < POLL_BAR_WIDTH; i++)
+                            bar[i] = (i < fill) ? '#' : '-';
+                        bar[POLL_BAR_WIDTH] = '\0';
+                        printf("\r[batch] [%s] %3d%% (%d/%d) ok=%d err=%d  ",
+                               bar, pct, batch_done, current_total,
+                               batch_ok, batch_timeout);
+                        fflush(stdout);
+                    }
+
+                } else {
+                    // Ciclo completo
+                    _count_ctx_t cc = { .count = 0 };
+                    kx_param_store_foreach(_count_readable, &cc);
+
+                    _poll_ctx_t ctx = {
+                        .total         = cc.count,
+                        .done          = 0,
+                        .ok            = 0,
+                        .errors        = 0,
+                        .skipped       = 0,
+                        .unchanged     = 0,
+                        .cycle_s       = cycle_s,
+                        .demand_active = true,
+                    };
+
+                    KX_LOG_CYCLE_START(TAG, cycle_s, kx_param_store_count(), ctx.total);
+                    kx_param_store_foreach(_poll_param, &ctx);
+                    KX_LOG_CYCLE_END(TAG, ctx.ok, ctx.errors, ctx.skipped, ctx.unchanged);
+
+                    batch_ok      += ctx.ok;
+                    batch_timeout += ctx.errors;
+                    batch_done    += ctx.ok + ctx.errors;
+
+                    cycle_s = (cycle_s + KX_TELEMETRY_INTERVAL_S) % 60;
+                }
+
                 xSemaphoreGive(s_foreach_mutex);
-                continue;
+
+                // Delay entre demandas para no saturar el bus RS-485
+                if (uxQueueMessagesWaiting(s_demand_queue) > 0) {
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
             }
 
-            // ── Ejecutar el poll correspondiente ─────────────
-            if (demand.param_id > 0) {
-                // Single-param
-                _poll_single_param(demand.param_id);
-
-            } else {
-                // Ciclo completo
-                _count_ctx_t cc = { .count = 0 };
-                kx_param_store_foreach(_count_readable, &cc);
-
-                _poll_ctx_t ctx = {
-                    .total         = cc.count,
-                    .done          = 0,
-                    .ok            = 0,
-                    .errors        = 0,
-                    .skipped       = 0,
-                    .unchanged     = 0,
-                    .cycle_s       = cycle_s,
-                    .demand_active = true,
-                };
-
-                KX_LOG_CYCLE_START(TAG, cycle_s, kx_param_store_count(), ctx.total);
-                kx_param_store_foreach(_poll_param, &ctx);
-                KX_LOG_CYCLE_END(TAG, ctx.ok, ctx.errors, ctx.skipped, ctx.unchanged);
-
-                cycle_s = (cycle_s + KX_TELEMETRY_INTERVAL_S) % 60;
-            }
-
-            xSemaphoreGive(s_foreach_mutex);
-
-            // Delay entre demandas consecutivas para no saturar el bus
-            if (uxQueueMessagesWaiting(s_demand_queue) > 0) {
-                vTaskDelay(pdMS_TO_TICKS(50));
+            // ── Resumen batch ─────────────────────────────────
+            if (batch_mode) {
+                printf("\n");
+                printf("┌──────────────────────────────────────┐\n");
+                printf("│        BATCH POLL  RESUMEN           │\n");
+                printf("├──────────────────────────────────────┤\n");
+                printf("│  Solicitados : %-4d                  │\n", batch_total);
+                printf("│  Procesados  : %-4d                  │\n", batch_done);
+                printf("│  OK (leídos) : %-4d                  │\n", batch_ok);
+                printf("│  Timeout     : %-4d                  │\n", batch_timeout);
+                printf("│  Expirados   : %-4d                  │\n", batch_skip);
+                printf("│  Heap libre  : %-8lu bytes       │\n",
+                       (unsigned long)kx_system_heap_free());
+                printf("└──────────────────────────────────────┘\n");
+                fflush(stdout);
             }
         }
 
@@ -714,11 +770,14 @@ esp_err_t kx_modbus_master_start(void)
     s_foreach_mutex = xSemaphoreCreateMutex();
     if (!s_foreach_mutex) { ESP_LOGE(TAG, "failed to create mutex"); return ESP_FAIL; }
 
-    // POLL_ALLOWED_BIT siempre activo; DEMAND_BIT apagado hasta el primer get
+    // POLL_ALLOWED_BIT siempre activo al arranque
     xEventGroupSetBits(s_poll_eg, POLL_ALLOWED_BIT);
 
     esp_err_t err = _uart_init();
-    if (err != ESP_OK) { ESP_LOGE(TAG, "UART init failed: %s", esp_err_to_name(err)); return err; }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "UART init failed: %s", esp_err_to_name(err));
+        return err;
+    }
 
     BaseType_t ret = xTaskCreate(_publisher_task, "kx_publisher", 4096, NULL,
                                   KX_TASK_PRIO_TELEMETRY - 1, NULL);
@@ -754,7 +813,8 @@ esp_err_t kx_modbus_read_one(int control_id, int param_id)
                                   (uint16_t)param->reg,
                                   (uint8_t)param->function_read, param);
     if (value == -FLT_MAX) {
-        kx_param_pub_error(control_id, param->param_id, "modbus_timeout", (uint16_t)param->reg);
+        kx_param_pub_error(control_id, param->param_id,
+                           "modbus_timeout", (uint16_t)param->reg);
         return ESP_FAIL;
     }
     kx_param_pub_status(control_id, param->param_id, value);
@@ -838,8 +898,7 @@ esp_err_t kx_modbus_write_one(int control_id, int param_id, float value)
         resp[0] != frame[0] ||
         resp[1] != frame[1] ||
         resp[2] != frame[2] ||
-        resp[3] != frame[3])
-    {
+        resp[3] != frame[3]) {
         ESP_LOGW(TAG, "write_one: respuesta inesperada (rx=%d) ctrl=%d param=%d",
                  rx, control_id, param_id);
         return ESP_FAIL;
