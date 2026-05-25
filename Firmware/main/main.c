@@ -155,8 +155,12 @@ static int _parse_get_param_id(const char *payload, size_t len)
 // ── Router de mensajes MQTT entrantes ─────────────────────────
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
-    ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
-             topic, len, kx_system_heap_free());
+    if (!_is_quiiot_entities_topic(topic)) {
+        ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
+                topic, len, kx_system_heap_free());
+    } else {
+        ESP_LOGD(TAG, "RX topic=%s | len=%zu", topic, len);
+    }
     ESP_LOGD(TAG, "payload: %.*s", (int)len, payload);
 
     if (_is_quiiot_entities_topic(topic)) {
@@ -170,7 +174,7 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
             if (last_slash && strcmp(last_slash + 1, "get") == 0) {
                 // Bloque 2: get → polling del param pedido (o ciclo completo si id=0)
                 int param_id = _parse_get_param_id(payload, len);
-                ESP_LOGI(TAG, "entities/get param_id=%d", param_id);
+                ESP_LOGD(TAG, "entities/get param_id=%d", param_id);
                 kx_modbus_request_poll(param_id);
             } else {
                 // Bloque 3: otro sub-topic → ignorar

@@ -68,6 +68,13 @@ static double _ts(void)
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
+// ── Filtro para silenciar logs repetitivos ───────────────────
+static bool _should_mute_log(const char *topic)
+{
+    if (!topic) return false;
+    return (strstr(topic, "/entities/get") != NULL);
+}
+
 // ── Redimensionar cola ────────────────────────────────────────
 void kx_mqtt_resize_queue(int num_controls)
 {
@@ -151,7 +158,6 @@ static void _track_control_from_topic(const char *topic)
 // ── Imprime la lista completa de controles detectados ─────────
 static void _log_controls_list(void)
 {
-    // quitar el guard s_controls_listed
     ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     ESP_LOGI(TAG, "CONTROLS DETECTED (%d total):", s_control_count);
     for (int i = 0; i < s_control_count; i++) {
@@ -168,9 +174,11 @@ static void _processing_task(void *arg)
 
     while (1) {
         if (xQueueReceive(s_msg_queue, &msg, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGI(TAG, "processing: topic=%s size=%d heap=%lu",
-                     msg.topic, (int)msg.len,
-                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+            if (!_should_mute_log(msg.topic)) {
+                ESP_LOGI(TAG, "processing: topic=%s size=%d heap=%lu",
+                         msg.topic, (int)msg.len,
+                         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+            }
 
             if (s_msg_cb) {
                 s_msg_cb(msg.topic, msg.payload, msg.len);
@@ -328,8 +336,10 @@ static void _mqtt_event_handler(void *arg, esp_event_base_t base,
             s_rx_written = 0;
 
             uint32_t available = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
-            ESP_LOGI(TAG, "RX start topic=%s total=%d heap=%lu",
-                     s_rx_topic, s_rx_total, (unsigned long)available);
+            if (!_should_mute_log(s_rx_topic)) {
+                ESP_LOGI(TAG, "RX start topic=%s total=%d heap=%lu",
+                         s_rx_topic, s_rx_total, (unsigned long)available);
+            }
 
             s_rx_buf = malloc(s_rx_total + 1);
             if (!s_rx_buf) {
@@ -369,10 +379,12 @@ static void _mqtt_event_handler(void *arg, esp_event_base_t base,
             if (s_rx_buf) {
                 s_rx_buf[s_rx_written] = '\0';
 
-                ESP_LOGI(TAG, "RX complete topic=%s size=%d heap=%lu%s",
-                         s_rx_topic, s_rx_written,
-                         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
-                         s_rx_written < ev->total_data_len ? " [TRUNCADO]" : "");
+                if (!_should_mute_log(s_rx_topic)) {
+                    ESP_LOGI(TAG, "RX complete topic=%s size=%d heap=%lu%s",
+                             s_rx_topic, s_rx_written,
+                             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+                             s_rx_written < ev->total_data_len ? " [TRUNCADO]" : "");
+                }
 
                 kx_msg_t msg = {
                     .topic   = strdup(s_rx_topic),
@@ -455,9 +467,6 @@ esp_err_t kx_mqtt_start(kx_mqtt_msg_cb_t on_message)
         .credentials.authentication.password  = KX_MQTT_PASSWORD,
 
         // ── TLS ──────────────────────────────────────────────
-        // OPCIÓN A: sin TLS → URI mqtt://host:1883
-        // OPCIÓN B: TLS con CA reconocida (Let's Encrypt)
-        //           → URI mqtts://host:8883 + descomentar:
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
 
         // ── Sesión ───────────────────────────────────────────
