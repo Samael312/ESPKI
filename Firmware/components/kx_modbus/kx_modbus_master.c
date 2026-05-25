@@ -988,39 +988,73 @@ esp_err_t kx_modbus_write_one(int control_id, int param_id, float value)
         ESP_LOGW(TAG, "write_one: unsupported FC 0x%02x", fc_write);
         return ESP_ERR_NOT_SUPPORTED;
     }
-
+ 
+    // ── Transformación inversa value → raw ───────────────────
     int16_t raw;
+ 
     if (fc_write == MB_FC_WRITE_SINGLE_COIL) {
+        // [FIX] Para Coils (FC 05), Modbus requiere estrictamente 0xFF00 para ON y 0x0000 para OFF.
+        // Ignoramos por completo offsets, additions y el clamping de registros.
         raw = (value > 0.0f) ? (int16_t)0xFF00 : 0x0000;
     } else {
-        float adj = value - param->addition;
-        raw = (param->offset != 0.0f && param->offset != 1.0f)
-              ? (int16_t)(adj / param->offset)
-              : (int16_t)adj;
+        // Lógica normal para registros (FC 06, FC 16, etc.)
+        // value = (float)(int16_t)raw -> inversa: adjusted = value - addition
+        float adjusted = value - param->addition;
+ 
+        if (param->offset != 0.0f && param->offset != 1.0f) {
+            raw = (int16_t)(adjusted / param->offset);
+        } else {
+            raw = (int16_t)adjusted;
+        }
+ 
+        // Clampear al rango permitido (en unidades raw, pre-transformación)
         if ((float)raw < param->minvalue) raw = (int16_t)param->minvalue;
         if ((float)raw > param->maxvalue) raw = (int16_t)param->maxvalue;
     }
-
-    ESP_LOGI(TAG, "write_one: ctrl=%d param=%d reg=0x%04x fc=0x%02x slave=%d "
-             "value=%.3f → raw=%d",
+ 
+    // Modificado el log para imprimir también en Hexadecimal (ayuda mucho con las Coils)
+    ESP_LOGI(TAG, "write_one: ctrl=%d param=%d reg=0x%04x fc=0x%02x "
+             "slave=%d value=%.3f → raw=%d (0x%04X)",
              control_id, param_id, param->reg, fc_write,
-             ctrl->slave_addr, value, (int)(uint16_t)raw);
-
+             ctrl->slave_addr, value, (int)(uint16_t)raw, (uint16_t)raw);
+ 
+    // ── Construir trama Modbus ────────────────────────────────
+    // Nota: El arreglo de 6 bytes funciona idéntico tanto para FC 05 como para FC 06.
     uint8_t frame[6] = {
-        (uint8_t)ctrl->slave_addr, fc_write,
-        (uint8_t)((uint16_t)param->reg >> 8), (uint8_t)((uint16_t)param->reg & 0xFF),
-        (uint8_t)((uint16_t)raw >> 8),         (uint8_t)((uint16_t)raw & 0xFF),
+        (uint8_t)ctrl->slave_addr,
+        fc_write,
+        (uint8_t)((uint16_t)param->reg >> 8),
+        (uint8_t)((uint16_t)param->reg & 0xFF),
+        (uint8_t)((uint16_t)raw >> 8),
+        (uint8_t)((uint16_t)raw & 0xFF),
     };
     uint8_t resp[16];
     int rx = -1;
     for (int a = 0; a < MODBUS_RETRY_COUNT && rx < 0; a++) {
         rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
-        if (rx < 0) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
+        if (rx < 0) {
+            ESP_LOGD(TAG, "write_one: intento %d fallido, reintentando...", attempt + 1);
+            vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
+        }
     }
-    if (rx < 0) { ESP_LOGW(TAG, "write_one: no response"); return ESP_FAIL; }
-    if (rx < 6 || resp[0] != frame[0] || resp[1] != frame[1] ||
-        resp[2] != frame[2] || resp[3] != frame[3]) {
-        ESP_LOGW(TAG, "write_one: unexpected response"); return ESP_FAIL;
+ 
+    if (rx < 0) {
+        ESP_LOGW(TAG, "write_one: sin respuesta tras %d intentos ctrl=%d param=%d",
+                 MODBUS_RETRY_COUNT, control_id, param_id);
+        return ESP_FAIL;
+    }
+ 
+    // ── Validar respuesta eco (FC 05 y FC 06) ─────────────────
+    // Ambos comandos devuelven un espejo exacto de los primeros 4 bytes.
+    if (rx < 6 ||
+        resp[0] != frame[0] ||   // slave_addr
+        resp[1] != frame[1] ||   // function code
+        resp[2] != frame[2] ||   // reg_hi
+        resp[3] != frame[3])     // reg_lo
+    {
+        ESP_LOGW(TAG, "write_one: respuesta inesperada (rx=%d) ctrl=%d param=%d",
+                 rx, control_id, param_id);
+        return ESP_FAIL;
     }
     uint16_t echo = ((uint16_t)resp[4] << 8) | resp[5];
     ESP_LOGI(TAG, "write_one: OK raw_sent=%d raw_echo=%d",
