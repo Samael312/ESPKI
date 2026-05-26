@@ -127,6 +127,24 @@ typedef struct {
 
 static QueueHandle_t s_demand_queue = NULL;
 
+#define PENDING_SET_SIZE  1024   
+
+static volatile uint8_t s_pending_bits[PENDING_SET_SIZE / 8] = {0};
+
+static inline void _pending_set(int param_id) {
+    uint32_t idx = ((uint32_t)param_id) & (PENDING_SET_SIZE - 1);
+    s_pending_bits[idx / 8] |= (1u << (idx % 8));
+}
+
+static inline void _pending_clear(int param_id) {
+    uint32_t idx = ((uint32_t)param_id) & (PENDING_SET_SIZE - 1);
+    s_pending_bits[idx / 8] &= ~(1u << (idx % 8));
+}
+
+static inline bool _pending_test(int param_id) {
+    uint32_t idx = ((uint32_t)param_id) & (PENDING_SET_SIZE - 1);
+    return (s_pending_bits[idx / 8] >> (idx % 8)) & 1u;
+}
 // =============================================================
 // Umbral de cambio para pub_report
 // =============================================================
@@ -214,26 +232,17 @@ void kx_modbus_request_poll(int param_id)
 {
     if (!s_demand_queue) return;
 
-    int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
-
-    // Deduplicación rápida: si el mismo param_id ya está en el frente
-    // de la cola y es reciente, descartarlo antes de encolar.
-    // La deduplicación exhaustiva ocurre al construir el snapshot.
-    kx_poll_demand_t peek;
-    if (xQueuePeek(s_demand_queue, &peek, 0) == pdTRUE) {
-        if (peek.param_id == param_id &&
-            (now_ms - peek.enqueued_ms) < (int64_t)KX_DEMAND_REPEAT_MS) {
-            ESP_LOGD(TAG, "demand dedup (fast) param_id=%d", param_id);
-            return;
-        }
+    // Rechazo O(1) si ya está pendiente en la cola
+    if (param_id != 0 && _pending_test(param_id)) {
+        ESP_LOGD(TAG, "demand dedup (bitmap) param_id=%d", param_id);
+        return;
     }
 
-    // Warning si la cola está cerca del límite
+    int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
+
     int used = (int)uxQueueMessagesWaiting(s_demand_queue);
     if (used >= DEMAND_WARN_HWM) {
-        ESP_LOGW(TAG,
-            "demand_queue near full: %d/%d — consider reducing get rate",
-            used, DEMAND_QUEUE_SIZE);
+        ESP_LOGW(TAG, "demand_queue near full: %d/%d", used, DEMAND_QUEUE_SIZE);
     }
 
     kx_poll_demand_t d = { .param_id = param_id, .enqueued_ms = now_ms };
@@ -243,10 +252,10 @@ void kx_modbus_request_poll(int param_id)
         return;
     }
 
+    if (param_id != 0) _pending_set(param_id);   // marcar pendiente TRAS encolar
     if (s_poll_eg) xEventGroupSetBits(s_poll_eg, DEMAND_BIT);
     ESP_LOGD(TAG, "demand enqueued param_id=%d queue=%d", param_id, used + 1);
 }
-
 // =============================================================
 // CRC16 Modbus
 // =============================================================
@@ -558,8 +567,8 @@ static int _drain_demand_queue(kx_poll_demand_t *snapshot, int capacity,
     int     count   = 0;
 
     kx_poll_demand_t d;
-    while (count < capacity &&
-           xQueueReceive(s_demand_queue, &d, 0) == pdTRUE) {
+     while (count < capacity && xQueueReceive(s_demand_queue, &d, 0) == pdTRUE) {
+        _pending_clear(d.param_id);
 
         // 1. Filtro de caducidad
         if ((now_ms - d.enqueued_ms) > (int64_t)(KX_DEMAND_TIMEOUT_S * 1000)) {
@@ -1033,7 +1042,7 @@ esp_err_t kx_modbus_write_one(int control_id, int param_id, float value)
     for (int a = 0; a < MODBUS_RETRY_COUNT && rx < 0; a++) {
         rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
         if (rx < 0) {
-            ESP_LOGD(TAG, "write_one: intento %d fallido, reintentando...", attempt + 1);
+            ESP_LOGD(TAG, "write_one: intento %d fallido...", a + 1);
             vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
         }
     }

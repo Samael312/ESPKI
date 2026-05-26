@@ -127,3 +127,6 @@ AGENTS.md
 
 .managed_components
 /managed_components/
+
+venv/
+/venv
