@@ -112,11 +112,7 @@ static bool _topic_last_segment_ends_with_set(const char *topic)
 {
     const char *last_slash = strrchr(topic, '/');
     if (!last_slash) return false;
-
-    const char *seg  = last_slash + 1;
-    size_t      slen = strlen(seg);
-
-    return (slen >= 4 && strcmp(seg + slen - 3, "set") == 0);
+    return strcmp(last_slash + 1, "set") == 0;
 }
 
 // ── Extrae el param_id del payload de entities/get ───────────
@@ -155,6 +151,9 @@ static int _parse_get_param_id(const char *payload, size_t len)
 // ── Router de mensajes MQTT entrantes ─────────────────────────
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
+    ESP_LOGI(TAG, "RAW RX topic=[%s] len=%d payload=%.80s", 
+             topic, (int)len, payload);  // TEMPORAL
+    
     if (!_is_quiiot_entities_topic(topic)) {
         ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
                 topic, len, kx_system_heap_free());

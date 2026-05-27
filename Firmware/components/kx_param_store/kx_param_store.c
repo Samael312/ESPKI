@@ -343,6 +343,9 @@ esp_err_t kx_param_store_parse(const char *payload, size_t len, int control_id)
         p.ts_last_read         = 0;
         p.last_published_value = FLT_MAX;
 
+        if (i < 3) {
+                ESP_LOGI(TAG, "param_id=%d sampling=%d", p.param_id, p.sampling);
+        }
         if (p.param_id <= 0) continue;
 
         if (_param_insert(ctrl, &p) == ESP_OK) {

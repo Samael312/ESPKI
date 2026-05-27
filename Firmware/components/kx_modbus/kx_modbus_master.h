@@ -17,17 +17,17 @@ void      kx_modbus_resume(void);
 
 // Lectura puntual bajo demanda.
 esp_err_t kx_modbus_read_one(int control_id, int param_id);
+
+// Escritura: ahora encola el comando en s_write_queue y retorna
+// inmediatamente. La writer task lo ejecuta en segundo plano
+// tomando el mutex entre lecturas del batch poll.
 esp_err_t kx_modbus_write_one(int control_id, int param_id, float value);
 
-// Llamar al recibir quiiot/{uuid}/entities/get.
-//
-// param_id > 0 → leer y publicar SOLO ese parámetro.
-//               Si la misma petición se repite antes de
-//               KX_DEMAND_REPEAT_MS ms, se re-encola con un
-//               pequeño jitter para evitar que varias lleguen
-//               al bus a la vez.
-//
-// param_id == 0 → ciclo completo (todos los params visibles).
-//
-// Las demandas se encolan; el _modbus_task las consume en orden.
+// Versión extendida con timestamp (usada internamente por kx_telemetry)
+esp_err_t kx_modbus_enqueue_write(int control_id, int param_id,
+                                   float value, double ts);
+
+// Encola una demanda de lectura.
+// param_id > 0 → leer solo ese parámetro.
+// param_id == 0 → ciclo completo.
 void kx_modbus_request_poll(int param_id);

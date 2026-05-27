@@ -4,8 +4,6 @@
 #include "kx_param_store.h"
 #include "kx_modbus_master.h"
 #include <sys/time.h>
-#include "kx_param_store.h"
-#include "kx_modbus_master.h"
 #include "cJSON.h"
 #include <string.h>
 #include <stdlib.h>
@@ -15,10 +13,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "cJSON.h"
 #include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
 #include <inttypes.h>
 
 static const char *TAG = "kx_telemetry";
@@ -95,11 +90,8 @@ void kx_param_pub_report(int control_id, int param_id, float value)
     kx_mqtt_publish(topic, payload, 0, 0);
 }
 
-/**
- * Publica un error genérico.
- * Topic: {uuid}/quiiot/entities/{id}/status
- */
-void kx_param_pub_error(int control_id, int param_id, const char *msg, uint16_t reg)
+void kx_param_pub_error(int control_id, int param_id,
+                        const char *msg, uint16_t reg)
 {
     char topic[128];
     char payload[256];
@@ -116,6 +108,13 @@ void kx_param_pub_error(int control_id, int param_id, const char *msg, uint16_t 
 
 // ─────────────────────────────────────────────────────────────
 // kx_param_handle_set
+//
+// Valida el payload, busca el control que contiene el param y
+// encola la escritura en kx_modbus_enqueue_write.  No toca el
+// bus Modbus directamente: la writer task lo ejecutará en
+// segundo plano mientras el batch poll sigue su curso.
+// ─────────────────────────────────────────────────────────────
+
 typedef struct {
     int    target_param_id;
     int    found_control_id;
@@ -136,7 +135,8 @@ static void _find_param_control_cb(int control_id, const kx_param_t *param,
 
 void kx_param_handle_set(const char *topic, const char *payload, size_t len)
 {
-    // ── 2. Parsear JSON ───────────────────────────────────────
+    ESP_LOGI(TAG, "handle_set CALLED topic=%s", topic);
+    // ── 1. Parsear JSON ───────────────────────────────────────
     cJSON *root = cJSON_ParseWithLength(payload, len);
     if (!root) {
         ESP_LOGW(TAG, "handle_set: JSON inválido topic=%s", topic);
@@ -145,31 +145,33 @@ void kx_param_handle_set(const char *topic, const char *payload, size_t len)
 
     // Validar _type == "entity-set"
     cJSON *type = cJSON_GetObjectItem(root, "_type");
-    if (!type || !cJSON_IsString(type) || strcmp(type->valuestring, "entity-set") != 0) {
-        ESP_LOGD(TAG, "handle_set: _type no es 'entity-set', ignorando topic=%s", topic);
+    if (!type || !cJSON_IsString(type) ||
+        strcmp(type->valuestring, "entity-set") != 0) {
+        ESP_LOGD(TAG, "handle_set: _type no es 'entity-set', ignorando");
         cJSON_Delete(root);
         return;
     }
 
     // Validar operation == "set"
     cJSON *op = cJSON_GetObjectItem(root, "operation");
-    if (!op || !cJSON_IsString(op) || strcmp(op->valuestring, "set") != 0) {
-        ESP_LOGD(TAG, "handle_set: operation no es 'set', ignorando topic=%s", topic);
+    if (!op || !cJSON_IsString(op) ||
+        strcmp(op->valuestring, "set") != 0) {
+        ESP_LOGD(TAG, "handle_set: operation no es 'set', ignorando");
         cJSON_Delete(root);
         return;
     }
 
-    // Extraer el ID único directamente del JSON (antiguo client_id de la URI)
+    // Extraer id
     cJSON *id_item = cJSON_GetObjectItem(root, "id");
     if (!id_item || !cJSON_IsNumber(id_item)) {
-        ESP_LOGW(TAG, "handle_set: Falta el campo numérico 'id' en el payload JSON");
+        ESP_LOGW(TAG, "handle_set: falta campo numérico 'id'");
         cJSON_Delete(root);
         return;
     }
     int entity_id = id_item->valueint;
 
     if (entity_id <= 0) {
-        ESP_LOGW(TAG, "handle_set: entity_id inválido extraído del JSON (%d)", entity_id);
+        ESP_LOGW(TAG, "handle_set: entity_id inválido (%d)", entity_id);
         cJSON_Delete(root);
         return;
     }
@@ -177,7 +179,8 @@ void kx_param_handle_set(const char *topic, const char *payload, size_t len)
     // Leer value
     cJSON *val_item = cJSON_GetObjectItem(root, "value");
     if (!val_item || !cJSON_IsNumber(val_item)) {
-        ESP_LOGW(TAG, "handle_set: sin campo 'value' numérico, entity_id=%d", entity_id);
+        ESP_LOGW(TAG, "handle_set: sin campo 'value' numérico, entity_id=%d",
+                 entity_id);
         cJSON_Delete(root);
         return;
     }
@@ -188,13 +191,12 @@ void kx_param_handle_set(const char *topic, const char *payload, size_t len)
     double incoming_ts = (ts_item && cJSON_IsNumber(ts_item))
                          ? ts_item->valuedouble : 0.0;
 
-    // Ya tenemos todas las variables locales, liberamos el objeto JSON de inmediato de la memoria RAM
     cJSON_Delete(root);
 
     ESP_LOGI(TAG, "handle_set: entity_id=%d value=%.3f ts_in=%.3f",
              entity_id, new_value, incoming_ts);
 
-    // ── 3. Buscar el param en todos los controles ─────────────
+    // ── 2. Buscar el param en todos los controles ─────────────
     _set_search_ctx_t ctx = {
         .target_param_id  = entity_id,
         .found_control_id = -1,
@@ -209,44 +211,37 @@ void kx_param_handle_set(const char *topic, const char *payload, size_t len)
         return;
     }
 
-    int control_id = ctx.found_control_id;
-    double stored_ts = ctx.found_ts_set;
+    int    control_id = ctx.found_control_id;
+    double stored_ts  = ctx.found_ts_set;
 
-    ESP_LOGI(TAG, "handle_set: entity_id=%d → control_id=%d | ts_in=%.3f ts_stored=%.3f",
+    ESP_LOGI(TAG, "handle_set: entity_id=%d → control_id=%d | "
+             "ts_in=%.3f ts_stored=%.3f",
              entity_id, control_id, incoming_ts, stored_ts);
 
-    // ── 4. Comparar timestamps ────────────────────────────────
+    // ── 3. Filtro de timestamp duplicado ──────────────────────
     if (incoming_ts > 0.0 && incoming_ts <= stored_ts) {
-        ESP_LOGD(TAG, "handle_set: ts_in=%.3f <= ts_stored=%.3f — ignorando (ya procesado)",
+        ESP_LOGD(TAG, "handle_set: ts_in=%.3f <= ts_stored=%.3f — ignorando",
                  incoming_ts, stored_ts);
         return;
     }
 
-    // ── 5a. Actualizar ts_set en el hash ──────────────────────
-    esp_err_t ts_err = kx_param_store_set_ts_set(control_id, entity_id, incoming_ts);
-    if (ts_err != ESP_OK) {
-        ESP_LOGW(TAG, "handle_set: no se pudo actualizar ts_set entity_id=%d", entity_id);
-    }
-
-    // ── 5b. Escribir por Modbus al esclavo ────────────────────
-    ESP_LOGI(TAG, "handle_set: escribiendo Modbus → ctrl=%d entity=%d value=%.3f",
+    // ── 4. Encolar escritura (no bloquea el bus) ──────────────
+    //   La writer task ejecutará la transacción Modbus en
+    //   segundo plano, tomando el mutex entre lecturas del poll.
+    ESP_LOGI(TAG, "handle_set: encolando escritura → ctrl=%d entity=%d value=%.3f",
              control_id, entity_id, new_value);
 
-    esp_err_t err = kx_modbus_write_one(control_id, entity_id, new_value);
-
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "handle_set: Modbus OK → ctrl=%d entity=%d value=%.3f",
-                 control_id, entity_id, new_value);
-    } else {
-        ESP_LOGW(TAG, "handle_set: Modbus FAIL → ctrl=%d entity=%d err=%s",
-                 control_id, entity_id, esp_err_to_name(err));
-        kx_param_pub_error(control_id, entity_id, "modbus_write_error", 0x0000);
+    esp_err_t err = kx_modbus_enqueue_write(control_id, entity_id,
+                                             new_value, incoming_ts);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "handle_set: enqueue falló err=%s", esp_err_to_name(err));
+        kx_param_pub_error(control_id, entity_id, "write_enqueue_error", 0x0000);
     }
 }
 
-
-
-// --- Tarea y Control ---
+// ─────────────────────────────────────────────────────────────
+// Tarea de telemetría (alive log)
+// ─────────────────────────────────────────────────────────────
 
 static void _telemetry_task(void *arg)
 {
@@ -256,7 +251,8 @@ static void _telemetry_task(void *arg)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));
 
-        ESP_LOGI(TAG, "alive seq=%" PRIu32 " heap=%" PRIu32 " rssi=%d mqtt=%s",
+        ESP_LOGI(TAG,
+                 "alive seq=%" PRIu32 " heap=%" PRIu32 " rssi=%d mqtt=%s",
                  seq,
                  kx_system_heap_free(),
                  (int)_get_rssi(),

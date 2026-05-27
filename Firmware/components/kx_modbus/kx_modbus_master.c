@@ -42,7 +42,8 @@ static const char *TAG = "kx_modbus";
 
 #define MODBUS_RESPONSE_TIMEOUT_MS    100
 #define MODBUS_INTER_FRAME_MS          20
-#define MODBUS_INTER_PARAM_MS          10
+// Inter-param delay reducido: permite que el writer se cuele entre lecturas
+#define MODBUS_INTER_PARAM_MS          15
 #define MODBUS_RETRY_COUNT              2
 
 #define MB_FC_READ_COILS           0x01
@@ -55,17 +56,9 @@ static const char *TAG = "kx_modbus";
 
 // =============================================================
 // Cola de publicación: resultados Modbus → MQTT publisher
-//
-// Backpressure:
-//   Si la cola supera PUB_QUEUE_BACKPRESSURE_HWM entradas
-//   (señal de que el publisher MQTT va lento), el hilo Modbus
-//   espera PUB_BACKPRESSURE_WAIT_MS antes de encolar el
-//   siguiente resultado, evitando drops silenciosos.
-//   Si tras PUB_BACKPRESSURE_TIMEOUT_MS la cola sigue llena,
-//   se descarta el resultado y se registra en el resumen.
 // =============================================================
 #define PUB_QUEUE_SIZE               500
-#define PUB_QUEUE_BACKPRESSURE_HWM   350   // 70 % de 500
+#define PUB_QUEUE_BACKPRESSURE_HWM   350
 #define PUB_BACKPRESSURE_WAIT_MS      20
 #define PUB_BACKPRESSURE_TIMEOUT_MS 2000
 
@@ -87,37 +80,38 @@ typedef struct {
 static QueueHandle_t s_pub_queue = NULL;
 
 // =============================================================
-// Cola de demandas de poll (demand_queue)
+// Cola de escrituras: comandos set → writer task
 //
-// Gestión de la cola:
-//   - DEMAND_QUEUE_SIZE slots (capacidad máxima física).
-//   - Durante la fase de recopilación se monitoriza el nivel:
-//     si supera DEMAND_WARN_HWM se emite un warning.
-//   - Al construir el snapshot se deduplican param_ids:
-//     si el mismo param_id aparece varias veces en la cola
-//     (p.ej. el frontend manda doble-click), solo se procesa
-//     una vez.
-//   - Demandas con edad > KX_DEMAND_TIMEOUT_S se descartan
-//     antes de procesar (ya caducaron).
-//   - Si el snapshot falla por OOM, la cola se vacía
-//     completamente para no bloquear el sistema.
+// La writer task tiene PRIORIDAD ALTA (mayor que el poll) para
+// que los comandos se ejecuten en cuanto el mutex quede libre
+// tras cada lectura individual del batch.
+// =============================================================
+#define WRITE_QUEUE_SIZE  64
+
+typedef struct {
+    int    control_id;
+    int    param_id;
+    float  value;
+    double ts;
+} kx_write_cmd_t;
+
+static QueueHandle_t s_write_queue = NULL;
+
+// =============================================================
+// Cola de demandas de poll
 // =============================================================
 #ifndef KX_DEMAND_REPEAT_MS
 #define KX_DEMAND_REPEAT_MS  5000
 #endif
 
 #define DEMAND_QUEUE_SIZE    1500
-#define DEMAND_WARN_HWM      700   // warning si la cola supera esto
+#define DEMAND_WARN_HWM       700
 
-// Fase de recopilación de ráfaga
-#define BURST_COLLECT_MAX_MS  3000  // timeout máximo de espera
-#define BURST_STABLE_MS        300  // ms sin cambio → ráfaga terminada
-#define BURST_POLL_MS           50  // resolución del bucle
+#define BURST_COLLECT_MAX_MS  3000
+#define BURST_STABLE_MS        300
+#define BURST_POLL_MS           50
 
-// Mínimo de demandas para activar el modo batch con barra de progreso
 #define BATCH_THRESHOLD          5
-
-// Máximo de param_ids mostrados en el resumen de errores
 #define BATCH_REPORT_MAX_ERRORS  200
 
 typedef struct {
@@ -127,7 +121,7 @@ typedef struct {
 
 static QueueHandle_t s_demand_queue = NULL;
 
-#define PENDING_SET_SIZE  1024   
+#define PENDING_SET_SIZE  1024
 
 static volatile uint8_t s_pending_bits[PENDING_SET_SIZE / 8] = {0};
 
@@ -135,24 +129,38 @@ static inline void _pending_set(int param_id) {
     uint32_t idx = ((uint32_t)param_id) & (PENDING_SET_SIZE - 1);
     s_pending_bits[idx / 8] |= (1u << (idx % 8));
 }
-
 static inline void _pending_clear(int param_id) {
     uint32_t idx = ((uint32_t)param_id) & (PENDING_SET_SIZE - 1);
     s_pending_bits[idx / 8] &= ~(1u << (idx % 8));
 }
-
 static inline bool _pending_test(int param_id) {
     uint32_t idx = ((uint32_t)param_id) & (PENDING_SET_SIZE - 1);
     return (s_pending_bits[idx / 8] >> (idx % 8)) & 1u;
 }
+
 // =============================================================
-// Umbral de cambio para pub_report
+// Timer de reports — contador global de segundos [0..59]
+//
+// El tick avanza 1 s cada segundo real (gestionado por la tarea
+// de reports separada).  Cuando tick_s % param->sampling == 0
+// se lee el param y se publica con PUB_KIND_REPORT.
+//
+// Solo se procesan params con sampling > 0.
+// El período máximo de sampling soportado es 60 s.
+// =============================================================
+#define REPORT_TICK_PERIOD_S   60     // máximo sampling posible
+#define REPORT_TASK_PERIOD_MS  1000   // resolución: 1 segundo
+
+static volatile int64_t s_report_tick_s = 0; // [0 .. REPORT_TICK_PERIOD_S-1]
+
+// =============================================================
+// Umbral de cambio (status)
 // =============================================================
 #define KX_STATUS_DELTA_ABS   0.5f
 #define KX_STATUS_DELTA_REL   0.01f
 
 // =============================================================
-// Barra de progreso ASCII (sobreescribe la misma línea)
+// Barra de progreso ASCII
 // =============================================================
 #define POLL_BAR_WIDTH 40
 
@@ -171,6 +179,15 @@ static void _print_batch_progress(int done, int total, int ok, int errors)
 
 // =============================================================
 // Sincronización Modbus
+//
+// s_foreach_mutex: mutex de bus — solo UN hilo toca la UART
+//                 a la vez.  El poll lo toma param a param
+//                 (lo suelta entre lecturas) para que el writer
+//                 pueda colarse sin esperar todo el batch.
+//
+// POLL_ALLOWED_BIT: señal de que el poll puede correr
+//                  (se baja durante kx_modbus_pause).
+// DEMAND_BIT:      hay demandas en s_demand_queue.
 // =============================================================
 #define POLL_ALLOWED_BIT   BIT0
 #define DEMAND_BIT         BIT1
@@ -181,11 +198,7 @@ static volatile bool       s_running       = false;
 static TaskHandle_t        s_task          = NULL;
 
 // =============================================================
-// _enqueue — encola resultado con backpressure activo
-//
-// Si s_pub_queue supera PUB_QUEUE_BACKPRESSURE_HWM, espera en
-// pasos de PUB_BACKPRESSURE_WAIT_MS hasta PUB_BACKPRESSURE_TIMEOUT_MS.
-// Si tras el timeout la cola sigue llena, devuelve false (drop).
+// _enqueue — encola resultado con backpressure
 // =============================================================
 static bool _enqueue(kx_pub_kind_t kind, int ctrl_id, int param_id,
                      float value, uint16_t reg, const char *errmsg)
@@ -199,14 +212,11 @@ static bool _enqueue(kx_pub_kind_t kind, int ctrl_id, int param_id,
     };
     if (errmsg) snprintf(r.error_msg, sizeof(r.error_msg), "%s", errmsg);
 
-    // Intento rápido sin espera
     if (xQueueSend(s_pub_queue, &r, 0) == pdTRUE) return true;
 
-    // Cola por encima del HWM: aplicar backpressure
     int waited = 0;
-    int hwm    = (int)uxQueueMessagesWaiting(s_pub_queue);
-    ESP_LOGW(TAG, "pub_queue backpressure: %d/%d — waiting for publisher...",
-             hwm, PUB_QUEUE_SIZE);
+    ESP_LOGW(TAG, "pub_queue backpressure: %d/%d",
+             (int)uxQueueMessagesWaiting(s_pub_queue), PUB_QUEUE_SIZE);
 
     while (waited < PUB_BACKPRESSURE_TIMEOUT_MS) {
         vTaskDelay(pdMS_TO_TICKS(PUB_BACKPRESSURE_WAIT_MS));
@@ -217,12 +227,36 @@ static bool _enqueue(kx_pub_kind_t kind, int ctrl_id, int param_id,
         }
     }
 
-    // Drop definitivo
-    ESP_LOGE(TAG,
-        "pub_queue DROP param_id=%d after %dms backpressure (queue=%d/%d)",
-        param_id, waited,
-        (int)uxQueueMessagesWaiting(s_pub_queue), PUB_QUEUE_SIZE);
+    ESP_LOGE(TAG, "pub_queue DROP param_id=%d after %dms (queue=%d/%d)",
+             param_id, waited,
+             (int)uxQueueMessagesWaiting(s_pub_queue), PUB_QUEUE_SIZE);
     return false;
+}
+
+// =============================================================
+// API pública — encolar comando de escritura
+// =============================================================
+esp_err_t kx_modbus_enqueue_write(int control_id, int param_id,
+                                   float value, double ts)
+{
+    if (!s_write_queue) return ESP_ERR_INVALID_STATE;
+
+    kx_write_cmd_t cmd = {
+        .control_id = control_id,
+        .param_id   = param_id,
+        .value      = value,
+        .ts         = ts,
+    };
+
+    if (xQueueSend(s_write_queue, &cmd, pdMS_TO_TICKS(200)) != pdTRUE) {
+        ESP_LOGE(TAG, "write_queue FULL — dropping write ctrl=%d param=%d",
+                 control_id, param_id);
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "write enqueued: ctrl=%d param=%d value=%.3f ts=%.3f",
+             control_id, param_id, value, ts);
+    return ESP_OK;
 }
 
 // =============================================================
@@ -232,18 +266,21 @@ void kx_modbus_request_poll(int param_id)
 {
     if (!s_demand_queue) return;
 
-    // Rechazo O(1) si ya está pendiente en la cola
+    if (!kx_param_store_is_ready()) {
+        ESP_LOGD(TAG, "demand rejected: store not ready (param_id=%d)", param_id);
+        return;
+    }
+
     if (param_id != 0 && _pending_test(param_id)) {
         ESP_LOGD(TAG, "demand dedup (bitmap) param_id=%d", param_id);
         return;
     }
 
     int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
+    int     used   = (int)uxQueueMessagesWaiting(s_demand_queue);
 
-    int used = (int)uxQueueMessagesWaiting(s_demand_queue);
-    if (used >= DEMAND_WARN_HWM) {
+    if (used >= DEMAND_WARN_HWM)
         ESP_LOGW(TAG, "demand_queue near full: %d/%d", used, DEMAND_QUEUE_SIZE);
-    }
 
     kx_poll_demand_t d = { .param_id = param_id, .enqueued_ms = now_ms };
     if (xQueueSend(s_demand_queue, &d, 0) != pdTRUE) {
@@ -252,10 +289,11 @@ void kx_modbus_request_poll(int param_id)
         return;
     }
 
-    if (param_id != 0) _pending_set(param_id);   // marcar pendiente TRAS encolar
+    if (param_id != 0) _pending_set(param_id);
     if (s_poll_eg) xEventGroupSetBits(s_poll_eg, DEMAND_BIT);
     ESP_LOGD(TAG, "demand enqueued param_id=%d queue=%d", param_id, used + 1);
 }
+
 // =============================================================
 // CRC16 Modbus
 // =============================================================
@@ -286,15 +324,19 @@ static esp_err_t _uart_init(void)
         .source_clk = UART_SCLK_DEFAULT,
     };
     esp_err_t err;
-    err = uart_param_config(KX_MODBUS_UART_NUM, &cfg);   if (err != ESP_OK) return err;
+    err = uart_param_config(KX_MODBUS_UART_NUM, &cfg);
+    if (err != ESP_OK) return err;
     err = uart_set_pin(KX_MODBUS_UART_NUM,
                        KX_MODBUS_TX_PIN, KX_MODBUS_RX_PIN,
-                       KX_MODBUS_RTS_PIN, UART_PIN_NO_CHANGE);  if (err != ESP_OK) return err;
-    err = uart_driver_install(KX_MODBUS_UART_NUM, 256, 256, 0, NULL, 0); if (err != ESP_OK) return err;
+                       KX_MODBUS_RTS_PIN, UART_PIN_NO_CHANGE);
+    if (err != ESP_OK) return err;
+    err = uart_driver_install(KX_MODBUS_UART_NUM, 256, 256, 0, NULL, 0);
+    if (err != ESP_OK) return err;
 
     if (KX_MODBUS_RTS_PIN != UART_PIN_NO_CHANGE) {
         err = uart_set_mode(KX_MODBUS_UART_NUM, UART_MODE_RS485_HALF_DUPLEX);
-        if (err != ESP_OK) ESP_LOGW(TAG, "RS485 mode failed: %s", esp_err_to_name(err));
+        if (err != ESP_OK)
+            ESP_LOGW(TAG, "RS485 mode failed: %s", esp_err_to_name(err));
     }
     ESP_LOGI(TAG, "UART%d ready: baud=%d TX=%d RX=%d RTS=%d",
              KX_MODBUS_UART_NUM, KX_MODBUS_BAUD,
@@ -303,7 +345,7 @@ static esp_err_t _uart_init(void)
 }
 
 // =============================================================
-// Transacción Modbus
+// Transacción Modbus (compartida por poll y writer)
 // =============================================================
 static int _modbus_transaction(const uint8_t *frame, size_t frame_len,
                                uint8_t *resp, size_t resp_max)
@@ -382,16 +424,143 @@ static inline bool _has_changed(float new_val, float last_val)
 }
 
 // =============================================================
+// Ejecutar escritura Modbus (solo desde _writer_task)
+// Requiere que el llamador ya tenga s_foreach_mutex.
+// =============================================================
+static esp_err_t _execute_write(int control_id, int param_id, float value)
+{
+    const kx_param_t *param = kx_param_store_get_param(control_id, param_id);
+    if (!param) {
+        ESP_LOGW(TAG, "write: param not found ctrl=%d param=%d", control_id, param_id);
+        return ESP_ERR_NOT_FOUND;
+    }
+    const kx_control_params_t *ctrl = kx_param_store_get(control_id);
+    if (!ctrl || ctrl->slave_addr == 0) {
+        ESP_LOGW(TAG, "write: no slave_addr ctrl=%d", control_id);
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint8_t fc_write = (uint8_t)param->function_write;
+    if (fc_write != MB_FC_WRITE_SINGLE_COIL  &&
+        fc_write != MB_FC_WRITE_SINGLE_REG   &&
+        fc_write != MB_FC_WRITE_MULTIPLE_REGS) {
+        ESP_LOGW(TAG, "write: unsupported FC 0x%02x", fc_write);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    int16_t raw;
+    if (fc_write == MB_FC_WRITE_SINGLE_COIL) {
+        raw = (value > 0.0f) ? (int16_t)0xFF00 : 0x0000;
+    } else {
+        float adjusted = value - param->addition;
+        if (param->offset != 0.0f && param->offset != 1.0f)
+            raw = (int16_t)(adjusted / param->offset);
+        else
+            raw = (int16_t)adjusted;
+        if ((float)raw < param->minvalue) raw = (int16_t)param->minvalue;
+        if ((float)raw > param->maxvalue) raw = (int16_t)param->maxvalue;
+    }
+
+    ESP_LOGI(TAG, "write: ctrl=%d param=%d reg=0x%04x fc=0x%02x "
+             "slave=%d value=%.3f → raw=%d (0x%04X)",
+             control_id, param_id, param->reg, fc_write,
+             ctrl->slave_addr, value, (int)(uint16_t)raw, (uint16_t)raw);
+
+    uint8_t frame[6] = {
+        (uint8_t)ctrl->slave_addr, fc_write,
+        (uint8_t)((uint16_t)param->reg >> 8),
+        (uint8_t)((uint16_t)param->reg & 0xFF),
+        (uint8_t)((uint16_t)raw >> 8),
+        (uint8_t)((uint16_t)raw & 0xFF),
+    };
+    uint8_t resp[16];
+    int rx = -1;
+    for (int a = 0; a < MODBUS_RETRY_COUNT && rx < 0; a++) {
+        rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
+        if (rx < 0) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
+    }
+
+    if (rx < 0) {
+        ESP_LOGW(TAG, "write: no response after %d retries ctrl=%d param=%d",
+                 MODBUS_RETRY_COUNT, control_id, param_id);
+        return ESP_FAIL;
+    }
+
+    if (rx < 6 ||
+        resp[0] != frame[0] || resp[1] != frame[1] ||
+        resp[2] != frame[2] || resp[3] != frame[3]) {
+        ESP_LOGW(TAG, "write: unexpected response rx=%d", rx);
+        return ESP_FAIL;
+    }
+
+    uint16_t echo = ((uint16_t)resp[4] << 8) | resp[5];
+    ESP_LOGI(TAG, "write: OK raw_sent=%d raw_echo=%d",
+             (int)(uint16_t)raw, (int)echo);
+    return ESP_OK;
+}
+
+// =============================================================
+// Tarea writer — ALTA PRIORIDAD
+//
+// Prioridad mayor que el poll para que en cuanto el poll suelte
+// el mutex (tras cada param individual), el writer se ejecute
+// antes de que el poll retome la siguiente lectura.
+//
+// Flujo por comando:
+//   1. Recibe cmd de s_write_queue (bloquea si vacía).
+//   2. Espera POLL_ALLOWED_BIT (respeta pause/resume).
+//   3. Toma s_foreach_mutex → ejecuta la escritura Modbus.
+//   4. Suelta mutex → publica resultado → loop.
+// =============================================================
+static void _writer_task(void *arg)
+{
+    kx_write_cmd_t cmd;
+    ESP_LOGI(TAG, "writer task started (HIGH PRIORITY)");
+
+    while (1) {
+        // Esperar un comando con bloqueo indefinido
+        if (xQueueReceive(s_write_queue, &cmd, portMAX_DELAY) != pdTRUE) continue;
+
+        ESP_LOGI(TAG, "writer: cmd ctrl=%d param=%d value=%.3f ts=%.3f — "
+                 "waiting for bus mutex...",
+                 cmd.control_id, cmd.param_id, cmd.value, cmd.ts);
+
+        // Respetar pausa del bus (p.ej. durante entities-discovery)
+        xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
+                            pdFALSE, pdTRUE, portMAX_DELAY);
+
+        // Tomar el mutex del bus — gracias a la alta prioridad, en cuanto
+        // el poll lo libere entre dos params, el writer lo captura primero.
+        xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
+
+        esp_err_t err = _execute_write(cmd.control_id, cmd.param_id, cmd.value);
+
+        if (err == ESP_OK) {
+            // Actualizar ts_set y publicar status con el valor escrito
+            kx_param_store_set_ts_set(cmd.control_id, cmd.param_id, cmd.ts);
+            _enqueue(PUB_KIND_STATUS, cmd.control_id, cmd.param_id,
+                     cmd.value, 0, NULL);
+            ESP_LOGI(TAG, "writer: OK ctrl=%d param=%d value=%.3f",
+                     cmd.control_id, cmd.param_id, cmd.value);
+        } else {
+            _enqueue(PUB_KIND_ERROR, cmd.control_id, cmd.param_id,
+                     0.0f, 0, "modbus_write_error");
+            ESP_LOGW(TAG, "writer: FAIL ctrl=%d param=%d err=%s",
+                     cmd.control_id, cmd.param_id, esp_err_to_name(err));
+        }
+
+        xSemaphoreGive(s_foreach_mutex);
+    }
+}
+
+// =============================================================
 // Tipos de contexto para kx_param_store_foreach
 // =============================================================
 typedef struct {
     int     total, done, ok, errors, skipped, unchanged;
-    int64_t cycle_s;
     bool    demand_active;
 } _poll_ctx_t;
 
 typedef struct { int count; } _count_ctx_t;
-
 typedef struct { int target_param_id; int found_ctrl_id; } _find_ctrl_ctx_t;
 
 // Contar parámetros legibles
@@ -413,10 +582,15 @@ static void _find_ctrl_cb(int ctrl_id, const kx_param_t *param, void *ud)
         ctx->found_ctrl_id = ctrl_id;
 }
 
-// Callback ciclo completo
-static void _poll_param(int control_id, const kx_param_t *param, void *ud)
+// =============================================================
+// Callback ciclo completo (poll bajo demanda)
+//
+// El mutex se toma y suelta por cada param para dar ventana al
+// writer entre lecturas individuales.
+// =============================================================
+static void _poll_param_one(int control_id, const kx_param_t *param,
+                             _poll_ctx_t *ctx)
 {
-    _poll_ctx_t *ctx = (_poll_ctx_t *)ud;
     if (param->function_read == 0 && param->function_write == 0) return;
     if (param->view == 0) return;
 
@@ -432,47 +606,174 @@ static void _poll_param(int control_id, const kx_param_t *param, void *ud)
 
     int64_t now_ms      = (int64_t)(esp_timer_get_time() / 1000ULL);
     int     sampling_ms = (param->sampling > 0 ? param->sampling : 60) * 1000;
-    bool    report_due  = (param->sampling > 0) &&
-                          (ctx->cycle_s % (int64_t)param->sampling == 0);
     bool    read_due    = ctx->demand_active ||
                           (param->ts_last_read == 0) ||
                           ((now_ms - param->ts_last_read) >= (int64_t)sampling_ms);
 
-    if (!read_due && !report_due) { ctx->skipped++; return; }
+    if (!read_due) { ctx->skipped++; return; }
 
+    // ── Tomar mutex, leer, soltar — ventana para el writer ────
+    xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
     float value = _read_register((uint8_t)ctrl->slave_addr,
                                   (uint16_t)param->reg, fc_read, param);
+    xSemaphoreGive(s_foreach_mutex);
+    // El writer puede colarse aquí ↑
+
     ctx->done++;
 
     if (value == -FLT_MAX) {
         _enqueue(PUB_KIND_ERROR, control_id, param->param_id,
                  0.0f, (uint16_t)param->reg, "modbus_timeout");
         ctx->errors++;
-        vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_PARAM_MS));
-        return;
-    }
-    ctx->ok++;
-    if (ctx->demand_active) {
-        _enqueue(PUB_KIND_STATUS, control_id, param->param_id, value, 0, NULL);
     } else {
-        ctx->unchanged++;
+        ctx->ok++;
+        if (ctx->demand_active) {
+            _enqueue(PUB_KIND_STATUS, control_id, param->param_id, value, 0, NULL);
+        } else {
+            ctx->unchanged++;
+        }
+        kx_param_t *mp = kx_param_store_get_param_mutable(control_id, param->param_id);
+        if (mp) { mp->ts_last_read = now_ms; mp->last_published_value = value; }
     }
-    if (report_due && _has_changed(value, param->last_published_value)) {
+
+    // Pausa inter-param: durante este delay el writer puede ejecutarse
+    vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_PARAM_MS));
+}
+
+// Wrapper foreach compatible
+typedef struct { _poll_ctx_t *ctx; } _poll_foreach_ud_t;
+static void _poll_param_cb(int ctrl_id, const kx_param_t *param, void *ud)
+{
+    _poll_foreach_ud_t *u = (_poll_foreach_ud_t *)ud;
+    _poll_param_one(ctrl_id, param, u->ctx);
+}
+
+// =============================================================
+// Contexto para el ciclo de reports
+// =============================================================
+typedef struct {
+    int64_t tick_s;  // valor actual del timer [0..59]
+    int     sent;
+    int     errors;
+} _report_ctx_t;
+
+// =============================================================
+// Callback de reports
+//
+// Solo se ejecuta para params con:
+//   · sampling > 0
+//   · view != 0
+//   · function_read es FC de lectura válido
+//   · tick_s % sampling == 0   (le toca en este segundo)
+//
+// El mutex se toma/suelta por param para no bloquear al writer.
+// =============================================================
+static void _report_param_cb(int control_id, const kx_param_t *param, void *ud)
+{
+    _report_ctx_t *ctx = (_report_ctx_t *)ud;
+
+    if (param->sampling <= 0) return;
+    if (param->view == 0)     return;
+    if (ctx->tick_s % (int64_t)param->sampling != 0) return;
+
+    uint8_t fc_read = (uint8_t)param->function_read;
+    bool is_read_fc = (fc_read == MB_FC_READ_COILS       ||
+                       fc_read == MB_FC_READ_DISCRETE     ||
+                       fc_read == MB_FC_READ_HOLDING_REGS ||
+                       fc_read == MB_FC_READ_INPUT_REGS);
+    if (!is_read_fc) return;
+
+    const kx_control_params_t *ctrl = kx_param_store_get(control_id);
+    if (!ctrl || ctrl->slave_addr == 0) return;
+
+    // Tomar mutex, leer, soltar (ventana para el writer)
+    xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
+    float value = _read_register((uint8_t)ctrl->slave_addr,
+                                  (uint16_t)param->reg, fc_read, param);
+    xSemaphoreGive(s_foreach_mutex);
+
+    if (value == -FLT_MAX) {
+        _enqueue(PUB_KIND_ERROR, control_id, param->param_id,
+                 0.0f, (uint16_t)param->reg, "report_timeout");
+        ctx->errors++;
+    } else {
         _enqueue(PUB_KIND_REPORT, control_id, param->param_id, value, 0, NULL);
+        ctx->sent++;
+
+        kx_param_t *mp = kx_param_store_get_param_mutable(control_id, param->param_id);
+        if (mp) {
+            mp->ts_last_read         = (int64_t)(esp_timer_get_time() / 1000ULL);
+            mp->last_published_value = value;
+        }
     }
-    kx_param_t *mp = kx_param_store_get_param_mutable(control_id, param->param_id);
-    if (mp) { mp->ts_last_read = now_ms; mp->last_published_value = value; }
 
     vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_PARAM_MS));
 }
 
 // =============================================================
-// Poll de un único param_id — devuelve true si OK
-// Modificado para retornar mediante out_dropped si falló la cola MQTT
+// Tarea de reports — tick de 1 segundo
+//
+// Tarea independiente y de baja prioridad que:
+//   · Incrementa s_report_tick_s cada segundo.
+//   · Cuando toca (tick_s == 0 o tick_s es múltiplo de algún
+//     sampling), espera POLL_ALLOWED_BIT y lanza el foreach
+//     de _report_param_cb.
+//   · No interfiere con el poll de demandas: comparten el mutex
+//     pero el writer tiene mayor prioridad que ambos.
 // =============================================================
-static bool _poll_single_param(int param_id, char *err_out, size_t err_len, bool *out_dropped)
+static void _report_task(void *arg)
 {
-    if (out_dropped) *out_dropped = false; // Por defecto no hay drop
+    ESP_LOGI(TAG, "report task started (period=%ds max_sampling=%ds)",
+             REPORT_TASK_PERIOD_MS / 1000, REPORT_TICK_PERIOD_S);
+
+    while (s_running) {
+        vTaskDelay(pdMS_TO_TICKS(REPORT_TASK_PERIOD_MS));
+
+        if (!kx_param_store_is_ready() || !kx_mqtt_is_connected()) continue;
+
+        // Avanzar tick
+        s_report_tick_s = (s_report_tick_s + 1) % REPORT_TICK_PERIOD_S;
+        int64_t tick = s_report_tick_s;
+        
+        ESP_LOGD(TAG, "report tick=%" PRId64 "s", tick);
+
+        // Filtrar rápido: solo procesar si el tick es múltiplo de algún
+        // sampling típico para no hacer foreach cada segundo sin necesidad.
+        // Los samplings no estándar (p.ej. 7, 11) siempre pasan el filtro
+        // en tick==0 (múltiplo de cualquier entero positivo).
+        static const int common_samplings[] = {5, 10, 15, 20, 30, 60, 0};
+        bool tick_relevant = (tick == 0); // tick 0 → siempre relevante
+        if (!tick_relevant) {
+            for (int k = 0; common_samplings[k]; k++) {
+                if (tick % common_samplings[k] == 0) { tick_relevant = true; break; }
+            }
+        }
+
+        if (!tick_relevant) continue;
+
+        // Esperar que el bus esté disponible (respeta pause)
+        xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
+                            pdFALSE, pdTRUE, portMAX_DELAY);
+
+        _report_ctx_t rctx = { .tick_s = tick };
+        kx_param_store_foreach(_report_param_cb, &rctx);
+
+        if (rctx.sent > 0 || rctx.errors > 0) {
+            ESP_LOGI(TAG, "report tick=%" PRId64 "s sent=%d errors=%d heap=%" PRIu32,
+                     tick, rctx.sent, rctx.errors, kx_system_heap_free());
+        }
+    }
+
+    vTaskDelete(NULL);
+}
+
+// =============================================================
+// Poll de un único param_id
+// =============================================================
+static bool _poll_single_param(int param_id, char *err_out, size_t err_len,
+                                bool *out_dropped)
+{
+    if (out_dropped) *out_dropped = false;
 
     _find_ctrl_ctx_t fctx = { .target_param_id = param_id, .found_ctrl_id = -1 };
     kx_param_store_foreach(_find_ctrl_cb, &fctx);
@@ -496,18 +797,22 @@ static bool _poll_single_param(int param_id, char *err_out, size_t err_len, bool
         snprintf(err_out, err_len, "not readable/visible"); return false;
     }
 
+    // Tomar mutex, leer, soltar — igual que en el ciclo completo
+    xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
     float value = _read_register((uint8_t)ctrl->slave_addr,
                                   (uint16_t)param->reg, fc_read, param);
+    xSemaphoreGive(s_foreach_mutex);
+
     if (value == -FLT_MAX) {
         bool enq = _enqueue(PUB_KIND_ERROR, fctx.found_ctrl_id, param->param_id,
-                 0.0f, (uint16_t)param->reg, "modbus_timeout");
+                            0.0f, (uint16_t)param->reg, "modbus_timeout");
         if (out_dropped) *out_dropped = !enq;
         snprintf(err_out, err_len, "modbus_timeout reg=0x%04x", param->reg);
         return false;
     }
-    
-    // Capturamos el resultado booleano directo del _enqueue
-    bool enq = _enqueue(PUB_KIND_STATUS, fctx.found_ctrl_id, param->param_id, value, 0, NULL);
+
+    bool enq = _enqueue(PUB_KIND_STATUS, fctx.found_ctrl_id, param->param_id,
+                        value, 0, NULL);
     if (out_dropped) *out_dropped = !enq;
 
     kx_param_t *mp = kx_param_store_get_param_mutable(fctx.found_ctrl_id, param_id);
@@ -537,26 +842,17 @@ static void _publisher_task(void *arg)
 }
 
 // =============================================================
-// Resultado de cada demanda individual en el batch
+// Resultado de cada demanda en el batch
 // =============================================================
 typedef struct {
     int  param_id;
     bool ok;
-    bool dropped;          // true si _enqueue devolvió false (pub_queue llena)
+    bool dropped;
     char err_msg[48];
 } _batch_result_t;
 
 // =============================================================
 // _drain_demand_queue
-//
-// Vacía s_demand_queue hacia un array snapshot[].
-// Aplica:
-//   1. Filtro de caducidad (age > KX_DEMAND_TIMEOUT_S).
-//   2. Deduplicación O(n): para cada param_id solo se guarda
-//      la entrada más reciente (mayor enqueued_ms).
-//
-// Devuelve el número de entradas válidas en snapshot[].
-// snapshot debe tener capacidad para 'capacity' elementos.
 // =============================================================
 static int _drain_demand_queue(kx_poll_demand_t *snapshot, int capacity,
                                 int *out_expired, int *out_dupes)
@@ -567,23 +863,19 @@ static int _drain_demand_queue(kx_poll_demand_t *snapshot, int capacity,
     int     count   = 0;
 
     kx_poll_demand_t d;
-     while (count < capacity && xQueueReceive(s_demand_queue, &d, 0) == pdTRUE) {
+    while (count < capacity && xQueueReceive(s_demand_queue, &d, 0) == pdTRUE) {
         _pending_clear(d.param_id);
 
-        // 1. Filtro de caducidad
         if ((now_ms - d.enqueued_ms) > (int64_t)(KX_DEMAND_TIMEOUT_S * 1000)) {
             expired++;
             continue;
         }
 
-        // 2. Deduplicación: buscar si ya existe en snapshot[]
         bool found = false;
         for (int j = 0; j < count; j++) {
             if (snapshot[j].param_id == d.param_id) {
-                // Conservar la entrada más reciente
-                if (d.enqueued_ms > snapshot[j].enqueued_ms) {
+                if (d.enqueued_ms > snapshot[j].enqueued_ms)
                     snapshot[j].enqueued_ms = d.enqueued_ms;
-                }
                 dupes++;
                 found = true;
                 break;
@@ -592,16 +884,11 @@ static int _drain_demand_queue(kx_poll_demand_t *snapshot, int capacity,
         if (!found) snapshot[count++] = d;
     }
 
-    // Si la cola tenía más entradas de las que cabían en snapshot,
-    // vaciar el resto (caducadas o sobrantes) para no dejar basura.
     int leftovers = 0;
     kx_poll_demand_t tmp;
     while (xQueueReceive(s_demand_queue, &tmp, 0) == pdTRUE) leftovers++;
-    if (leftovers > 0) {
-        ESP_LOGW(TAG,
-            "_drain: %d leftover demands discarded (snapshot capacity=%d)",
-            leftovers, capacity);
-    }
+    if (leftovers > 0)
+        ESP_LOGW(TAG, "_drain: %d leftover demands discarded", leftovers);
 
     if (out_expired) *out_expired = expired;
     if (out_dupes)   *out_dupes   = dupes;
@@ -609,7 +896,7 @@ static int _drain_demand_queue(kx_poll_demand_t *snapshot, int capacity,
 }
 
 // =============================================================
-// Tarea principal Modbus
+// Tarea principal Modbus — solo poll bajo demanda
 // =============================================================
 static void _modbus_task(void *arg)
 {
@@ -618,26 +905,27 @@ static void _modbus_task(void *arg)
     ESP_LOGI(TAG, "entities ready (%d controls) — ready for poll demands",
              kx_param_store_count());
 
-    int64_t cycle_s = 5;
-
     while (s_running) {
 
         // ── 1. Esperar primera demanda ────────────────────────
-        xEventGroupWaitBits(s_poll_eg, DEMAND_BIT,
-                            pdFALSE, pdTRUE, portMAX_DELAY);
+        EventBits_t bits = xEventGroupWaitBits(
+            s_poll_eg, DEMAND_BIT,
+            pdFALSE, pdTRUE,
+            portMAX_DELAY
+        );
+
+        if (!(bits & DEMAND_BIT)) continue;
 
         // ── 2. Fase de recopilación de ráfaga ─────────────────
-        //   Esperamos hasta que el tamaño de s_demand_queue se
-        //   estabilice BURST_STABLE_MS ms o pasen BURST_COLLECT_MAX_MS.
         {
-            int64_t t0      = (int64_t)(esp_timer_get_time() / 1000ULL);
-            int     prev    = -1;
-            int     stable  = 0;
+            int64_t t0     = (int64_t)(esp_timer_get_time() / 1000ULL);
+            int     prev   = -1;
+            int     stable = 0;
             ESP_LOGI(TAG, "collecting burst...");
 
             while (1) {
                 vTaskDelay(pdMS_TO_TICKS(BURST_POLL_MS));
-                int cur     = (int)uxQueueMessagesWaiting(s_demand_queue);
+                int     cur = (int)uxQueueMessagesWaiting(s_demand_queue);
                 int64_t ela = (int64_t)(esp_timer_get_time() / 1000ULL) - t0;
 
                 if (cur == prev) {
@@ -647,13 +935,11 @@ static void _modbus_task(void *arg)
                                  cur, ela);
                         break;
                     }
-                } else {
-                    stable = 0;
-                }
+                } else { stable = 0; }
                 prev = cur;
+
                 if (ela >= BURST_COLLECT_MAX_MS) {
-                    ESP_LOGW(TAG, "burst timeout (%dms): %d demands",
-                             BURST_COLLECT_MAX_MS, cur);
+                    ESP_LOGW(TAG, "burst timeout: %d demands", cur);
                     break;
                 }
             }
@@ -666,15 +952,12 @@ static void _modbus_task(void *arg)
             continue;
         }
 
-        // Reservamos por el tamaño bruto; _drain reducirá si hay dupes.
         kx_poll_demand_t *snapshot = malloc((size_t)raw_count *
                                             sizeof(kx_poll_demand_t));
         if (!snapshot) {
-            ESP_LOGE(TAG,
-                "OOM snapshot (%d demands) — flushing demand_queue", raw_count);
-            // Liberar toda la cola para no quedar bloqueados
-            kx_poll_demand_t tmp;
-            while (xQueueReceive(s_demand_queue, &tmp, 0) == pdTRUE) {}
+            ESP_LOGE(TAG, "OOM snapshot (%d demands) — flushing", raw_count);
+            kx_poll_demand_t tmp2;
+            while (xQueueReceive(s_demand_queue, &tmp2, 0) == pdTRUE) {}
             xEventGroupClearBits(s_poll_eg, DEMAND_BIT);
             continue;
         }
@@ -682,12 +965,10 @@ static void _modbus_task(void *arg)
         int expired = 0, dupes = 0;
         int valid_count = _drain_demand_queue(snapshot, raw_count,
                                               &expired, &dupes);
-
         xEventGroupClearBits(s_poll_eg, DEMAND_BIT);
 
-        ESP_LOGI(TAG,
-            "snapshot: raw=%d valid=%d expired=%d dupes=%d",
-            raw_count, valid_count, expired, dupes);
+        ESP_LOGI(TAG, "snapshot: raw=%d valid=%d expired=%d dupes=%d",
+                 raw_count, valid_count, expired, dupes);
 
         if (valid_count == 0) { free(snapshot); continue; }
 
@@ -698,7 +979,7 @@ static void _modbus_task(void *arg)
         }
 
         if (has_full_cycle) {
-            ESP_LOGI(TAG, "full poll cycle (cycle_s=%" PRId64 ")", cycle_s);
+            ESP_LOGI(TAG, "full poll cycle (demand_active)");
             if (!kx_mqtt_is_connected() || !kx_param_store_is_ready()) {
                 ESP_LOGW(TAG, "full cycle skipped: no mqtt/store");
                 free(snapshot);
@@ -706,19 +987,18 @@ static void _modbus_task(void *arg)
             }
             xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
                                 pdFALSE, pdTRUE, portMAX_DELAY);
-            xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
-            if (s_running && kx_param_store_is_ready()) {
-                _count_ctx_t cc = { .count = 0 };
-                kx_param_store_foreach(_count_readable, &cc);
-                _poll_ctx_t ctx = {
-                    .total = cc.count, .cycle_s = cycle_s, .demand_active = true
-                };
-                KX_LOG_CYCLE_START(TAG, cycle_s, kx_param_store_count(), ctx.total);
-                kx_param_store_foreach(_poll_param, &ctx);
-                KX_LOG_CYCLE_END(TAG, ctx.ok, ctx.errors, ctx.skipped, ctx.unchanged);
-                cycle_s = (cycle_s + KX_TELEMETRY_INTERVAL_S) % 60;
-            }
-            xSemaphoreGive(s_foreach_mutex);
+
+            _count_ctx_t cc = { .count = 0 };
+            kx_param_store_foreach(_count_readable, &cc);
+            _poll_ctx_t ctx = { .total = cc.count, .demand_active = true };
+
+            KX_LOG_CYCLE_START(TAG, 0, kx_param_store_count(), ctx.total);
+
+            // Iterar param a param soltando mutex entre lecturas
+            _poll_foreach_ud_t ud = { .ctx = &ctx };
+            kx_param_store_foreach(_poll_param_cb, &ud);
+
+            KX_LOG_CYCLE_END(TAG, ctx.ok, ctx.errors, ctx.skipped, ctx.unchanged);
             free(snapshot);
             continue;
         }
@@ -749,7 +1029,7 @@ static void _modbus_task(void *arg)
 
         int batch_ok      = 0;
         int batch_errors  = 0;
-        int batch_dropped = 0;   // drops de pub_queue por backpressure
+        int batch_dropped = 0;
 
         for (int i = 0; i < valid_count && s_running; i++) {
             int param_id = snapshot[i].param_id;
@@ -761,31 +1041,25 @@ static void _modbus_task(void *arg)
                 results[i].ok = false;
                 batch_errors++;
                 if (batch_mode)
-                    _print_batch_progress(i + 1, valid_count,
-                                          batch_ok, batch_errors);
+                    _print_batch_progress(i + 1, valid_count, batch_ok, batch_errors);
                 continue;
             }
 
             xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
                                 pdFALSE, pdTRUE, portMAX_DELAY);
-            xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
 
-            bool ok = false;
-            bool dropped = false; // Bandera local para determinar el drop real
+            // _poll_single_param ya toma/suelta el mutex internamente
+            bool ok      = false;
+            bool dropped = false;
 
             if (s_running && kx_param_store_is_ready()) {
-                // Ejecutamos la función pasando la referencia de la bandera
                 ok = _poll_single_param(param_id,
                                         results[i].err_msg,
                                         sizeof(results[i].err_msg),
                                         &dropped);
-
-                // Si la lectura Modbus fue OK pero el enqueue determinó un drop real
                 if (ok && dropped) {
                     results[i].dropped = true;
                     batch_dropped++;
-                    // No marcamos como error general: la lectura Modbus fue correcta,
-                    // solo falló de verdad la publicación MQTT.
                     snprintf(results[i].err_msg, sizeof(results[i].err_msg),
                              "pub_queue drop");
                 }
@@ -794,8 +1068,6 @@ static void _modbus_task(void *arg)
                          "task stopping");
             }
 
-            xSemaphoreGive(s_foreach_mutex);
-
             results[i].ok = ok;
             if (ok)  batch_ok++;
             else     batch_errors++;
@@ -803,34 +1075,32 @@ static void _modbus_task(void *arg)
             if (batch_mode)
                 _print_batch_progress(i + 1, valid_count, batch_ok, batch_errors);
 
+            // Pausa inter-param → ventana para el writer
             if (i + 1 < valid_count)
                 vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_PARAM_MS));
         }
 
         if (batch_mode) { printf("\n"); fflush(stdout); }
 
-        // ── 6. Resumen detallado ───────────────────────────────
+        // ── 6. Resumen ─────────────────────────────────────────
         printf("┌──────────────────────────────────────────────────────────────┐\n");
         printf("│                    BATCH POLL  RESUMEN                        │\n");
         printf("├──────────────────────────────────────────────────────────────┤\n");
         printf("│  Recopilados : %-5d  (dupes descartados: %-5d)             │\n",
                valid_count, dupes);
-        printf("│  Expirados   : %-5d                                          │\n",
-               expired);
-        printf("│  OK (leídos) : %-5d                                          │\n",
-               batch_ok);
-        printf("│  Errores     : %-5d                                          │\n",
-               batch_errors);
-        printf("│  Drops MQTT  : %-5d  (pub_queue llena tras backpressure)     │\n",
-               batch_dropped);
+        printf("│  Expirados   : %-5d                                          │\n", expired);
+        printf("│  OK (leídos) : %-5d                                          │\n", batch_ok);
+        printf("│  Errores     : %-5d                                          │\n", batch_errors);
+        printf("│  Drops MQTT  : %-5d                                          │\n", batch_dropped);
         printf("│  Heap libre  : %-8lu bytes                                │\n",
                (unsigned long)kx_system_heap_free());
         printf("│  pub_queue   : %-5d / %-5d slots usados                     │\n",
                (int)uxQueueMessagesWaiting(s_pub_queue), PUB_QUEUE_SIZE);
         printf("│  demand_queue: %-5d / %-5d slots pendientes                 │\n",
                (int)uxQueueMessagesWaiting(s_demand_queue), DEMAND_QUEUE_SIZE);
+        printf("│  write_queue : %-5d / %-5d slots pendientes                 │\n",
+               (int)uxQueueMessagesWaiting(s_write_queue), WRITE_QUEUE_SIZE);
 
-        // Lista param_ids OK
         if (batch_ok > 0) {
             printf("├──────────────────────────────────────────────────────────────┤\n");
             printf("│  ✓ Params OK:                                                │\n│    ");
@@ -846,7 +1116,6 @@ static void _modbus_task(void *arg)
             printf("\n");
         }
 
-        // Lista param_ids con error
         if (batch_errors > 0) {
             printf("├──────────────────────────────────────────────────────────────┤\n");
             printf("│  ✗ Params con error:                                         │\n");
@@ -857,16 +1126,13 @@ static void _modbus_task(void *arg)
                        results[i].param_id, results[i].err_msg);
                 shown++;
             }
-            if (batch_errors > BATCH_REPORT_MAX_ERRORS) {
-                printf("│    ... y %d más\n",
-                       batch_errors - BATCH_REPORT_MAX_ERRORS);
-            }
+            if (batch_errors > BATCH_REPORT_MAX_ERRORS)
+                printf("│    ... y %d más\n", batch_errors - BATCH_REPORT_MAX_ERRORS);
         }
 
-        // Lista params con drop de pub_queue
         if (batch_dropped > 0) {
             printf("├──────────────────────────────────────────────────────────────┤\n");
-            printf("│  ⚠ Params leídos pero NO publicados (pub_queue drop):        │\n│    ");
+            printf("│  ⚠ Drops pub_queue:                                          │\n│    ");
             int col = 4;
             for (int i = 0; i < valid_count; i++) {
                 if (!results[i].dropped) continue;
@@ -920,6 +1186,12 @@ void kx_modbus_resume(void)
 
 // =============================================================
 // start / stop
+//
+// Prioridades de tareas:
+//   kx_writer    → KX_TASK_PRIO_TELEMETRY + 2  (MÁS ALTA — comandos primero)
+//   kx_modbus    → KX_TASK_PRIO_TELEMETRY + 1  (poll bajo demanda)
+//   kx_report    → KX_TASK_PRIO_TELEMETRY      (reports periódicos)
+//   kx_publisher → KX_TASK_PRIO_TELEMETRY - 1  (publicación MQTT)
 // =============================================================
 esp_err_t kx_modbus_master_start(void)
 {
@@ -930,6 +1202,9 @@ esp_err_t kx_modbus_master_start(void)
 
     s_demand_queue = xQueueCreate(DEMAND_QUEUE_SIZE, sizeof(kx_poll_demand_t));
     if (!s_demand_queue) { ESP_LOGE(TAG, "demand_queue alloc failed"); return ESP_FAIL; }
+
+    s_write_queue = xQueueCreate(WRITE_QUEUE_SIZE, sizeof(kx_write_cmd_t));
+    if (!s_write_queue) { ESP_LOGE(TAG, "write_queue alloc failed"); return ESP_FAIL; }
 
     s_poll_eg = xEventGroupCreate();
     if (!s_poll_eg) { ESP_LOGE(TAG, "EventGroup alloc failed"); return ESP_FAIL; }
@@ -942,14 +1217,35 @@ esp_err_t kx_modbus_master_start(void)
     esp_err_t err = _uart_init();
     if (err != ESP_OK) { ESP_LOGE(TAG, "UART init: %s", esp_err_to_name(err)); return err; }
 
-    BaseType_t ret = xTaskCreate(_publisher_task, "kx_publisher", 4096, NULL,
-                                  KX_TASK_PRIO_TELEMETRY - 1, NULL);
+    BaseType_t ret;
+
+    // Publisher (baja prioridad — solo MQTT, no toca el bus)
+    ret = xTaskCreate(_publisher_task, "kx_publisher", 4096, NULL,
+                      KX_TASK_PRIO_TELEMETRY - 1, NULL);
     if (ret != pdPASS) { ESP_LOGE(TAG, "publisher task failed"); return ESP_FAIL; }
 
+    // Writer — PRIORIDAD MÁS ALTA del grupo Modbus
+    ret = xTaskCreate(_writer_task, "kx_writer", 4096, NULL,
+                      KX_TASK_PRIO_TELEMETRY + 2, NULL);
+    if (ret != pdPASS) { ESP_LOGE(TAG, "writer task failed"); return ESP_FAIL; }
+
+    // Report task — prioridad media
+    ret = xTaskCreate(_report_task, "kx_report", 4096, NULL,
+                      KX_TASK_PRIO_TELEMETRY, NULL);
+    if (ret != pdPASS) { ESP_LOGE(TAG, "report task failed"); return ESP_FAIL; }
+
     s_running = true;
+
+    // Poll task — prioridad alta pero menor que el writer
     ret = xTaskCreate(_modbus_task, "kx_modbus", 8192, NULL,
-                      KX_TASK_PRIO_TELEMETRY, &s_task);
+                      KX_TASK_PRIO_TELEMETRY + 1, &s_task);
     if (ret != pdPASS) { s_running = false; return ESP_FAIL; }
+
+    ESP_LOGI(TAG, "started — writer prio=%d poll prio=%d report prio=%d pub prio=%d",
+             KX_TASK_PRIO_TELEMETRY + 2,
+             KX_TASK_PRIO_TELEMETRY + 1,
+             KX_TASK_PRIO_TELEMETRY,
+             KX_TASK_PRIO_TELEMETRY - 1);
 
     return ESP_OK;
 }
@@ -958,7 +1254,7 @@ void kx_modbus_master_stop(void) { s_running = false; }
 bool kx_modbus_master_is_running(void) { return s_running; }
 
 // =============================================================
-// kx_modbus_read_one
+// kx_modbus_read_one (API síncrona externa)
 // =============================================================
 esp_err_t kx_modbus_read_one(int control_id, int param_id)
 {
@@ -967,9 +1263,12 @@ esp_err_t kx_modbus_read_one(int control_id, int param_id)
     const kx_control_params_t *ctrl = kx_param_store_get(control_id);
     if (!ctrl || ctrl->slave_addr == 0) return ESP_ERR_INVALID_STATE;
 
+    xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
     float value = _read_register((uint8_t)ctrl->slave_addr,
                                   (uint16_t)param->reg,
                                   (uint8_t)param->function_read, param);
+    xSemaphoreGive(s_foreach_mutex);
+
     if (value == -FLT_MAX) {
         kx_param_pub_error(control_id, param->param_id,
                            "modbus_timeout", (uint16_t)param->reg);
@@ -980,93 +1279,9 @@ esp_err_t kx_modbus_read_one(int control_id, int param_id)
 }
 
 // =============================================================
-// kx_modbus_write_one
+// kx_modbus_write_one — encola (no ejecuta directamente)
 // =============================================================
 esp_err_t kx_modbus_write_one(int control_id, int param_id, float value)
 {
-    const kx_param_t *param = kx_param_store_get_param(control_id, param_id);
-    if (!param) { ESP_LOGW(TAG, "write_one: param not found"); return ESP_ERR_NOT_FOUND; }
-    const kx_control_params_t *ctrl = kx_param_store_get(control_id);
-    if (!ctrl || ctrl->slave_addr == 0) {
-        ESP_LOGW(TAG, "write_one: no slave_addr"); return ESP_ERR_INVALID_STATE;
-    }
-    uint8_t fc_write = (uint8_t)param->function_write;
-    if (fc_write != MB_FC_WRITE_SINGLE_COIL  &&
-        fc_write != MB_FC_WRITE_SINGLE_REG   &&
-        fc_write != MB_FC_WRITE_MULTIPLE_REGS) {
-        ESP_LOGW(TAG, "write_one: unsupported FC 0x%02x", fc_write);
-        return ESP_ERR_NOT_SUPPORTED;
-    }
- 
-    // ── Transformación inversa value → raw ───────────────────
-    int16_t raw;
- 
-    if (fc_write == MB_FC_WRITE_SINGLE_COIL) {
-        // [FIX] Para Coils (FC 05), Modbus requiere estrictamente 0xFF00 para ON y 0x0000 para OFF.
-        // Ignoramos por completo offsets, additions y el clamping de registros.
-        raw = (value > 0.0f) ? (int16_t)0xFF00 : 0x0000;
-    } else {
-        // Lógica normal para registros (FC 06, FC 16, etc.)
-        // value = (float)(int16_t)raw -> inversa: adjusted = value - addition
-        float adjusted = value - param->addition;
- 
-        if (param->offset != 0.0f && param->offset != 1.0f) {
-            raw = (int16_t)(adjusted / param->offset);
-        } else {
-            raw = (int16_t)adjusted;
-        }
- 
-        // Clampear al rango permitido (en unidades raw, pre-transformación)
-        if ((float)raw < param->minvalue) raw = (int16_t)param->minvalue;
-        if ((float)raw > param->maxvalue) raw = (int16_t)param->maxvalue;
-    }
- 
-    // Modificado el log para imprimir también en Hexadecimal (ayuda mucho con las Coils)
-    ESP_LOGI(TAG, "write_one: ctrl=%d param=%d reg=0x%04x fc=0x%02x "
-             "slave=%d value=%.3f → raw=%d (0x%04X)",
-             control_id, param_id, param->reg, fc_write,
-             ctrl->slave_addr, value, (int)(uint16_t)raw, (uint16_t)raw);
- 
-    // ── Construir trama Modbus ────────────────────────────────
-    // Nota: El arreglo de 6 bytes funciona idéntico tanto para FC 05 como para FC 06.
-    uint8_t frame[6] = {
-        (uint8_t)ctrl->slave_addr,
-        fc_write,
-        (uint8_t)((uint16_t)param->reg >> 8),
-        (uint8_t)((uint16_t)param->reg & 0xFF),
-        (uint8_t)((uint16_t)raw >> 8),
-        (uint8_t)((uint16_t)raw & 0xFF),
-    };
-    uint8_t resp[16];
-    int rx = -1;
-    for (int a = 0; a < MODBUS_RETRY_COUNT && rx < 0; a++) {
-        rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
-        if (rx < 0) {
-            ESP_LOGD(TAG, "write_one: intento %d fallido...", a + 1);
-            vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
-        }
-    }
- 
-    if (rx < 0) {
-        ESP_LOGW(TAG, "write_one: sin respuesta tras %d intentos ctrl=%d param=%d",
-                 MODBUS_RETRY_COUNT, control_id, param_id);
-        return ESP_FAIL;
-    }
- 
-    // ── Validar respuesta eco (FC 05 y FC 06) ─────────────────
-    // Ambos comandos devuelven un espejo exacto de los primeros 4 bytes.
-    if (rx < 6 ||
-        resp[0] != frame[0] ||   // slave_addr
-        resp[1] != frame[1] ||   // function code
-        resp[2] != frame[2] ||   // reg_hi
-        resp[3] != frame[3])     // reg_lo
-    {
-        ESP_LOGW(TAG, "write_one: respuesta inesperada (rx=%d) ctrl=%d param=%d",
-                 rx, control_id, param_id);
-        return ESP_FAIL;
-    }
-    uint16_t echo = ((uint16_t)resp[4] << 8) | resp[5];
-    ESP_LOGI(TAG, "write_one: OK raw_sent=%d raw_echo=%d",
-             (int)(uint16_t)raw, (int)echo);
-    return ESP_OK;
+    return kx_modbus_enqueue_write(control_id, param_id, value, 0.0);
 }
