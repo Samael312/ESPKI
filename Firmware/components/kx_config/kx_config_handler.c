@@ -398,6 +398,31 @@ static esp_err_t _handle_device(cJSON *root)
     return ESP_OK;
 }
 
+
+static void _print_active_sampling_cb(int control_id, const kx_param_t *param, void *user_data)
+{
+    // Filtramos solo los que tengan un muestreo mayor a 0
+    if (param->sampling > 0) {
+        ESP_LOGI("STORE_DEBUG", "Control ID: %d | Param ID: %d | Reg: 0x%04X | Sampling: %ds | Name: %s",
+                 control_id, 
+                 param->param_id, 
+                 param->reg, 
+                 param->sampling, 
+                 param->name);
+    }
+}
+
+// 2. Función pública que puedes llamar cuando desees ver la lista
+void kx_param_store_print_active_samplings(void)
+{
+    ESP_LOGI("STORE_DEBUG", "=== LISTANDO PARÁMETROS CON SAMPLING > 0 ===");
+    
+    // Llamamos al iterador de tu kx_param_store pasando nuestro callback
+    kx_param_store_foreach(_print_active_sampling_cb, NULL);
+    
+    ESP_LOGI("STORE_DEBUG", "===========================================");
+}
+
 // =============================================================
 // Handler principal
 // =============================================================
@@ -426,6 +451,7 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
                 esp_err_t nvs_err = kx_param_store_save_nvs();
                 if (nvs_err == ESP_OK) {
                     ESP_LOGI(TAG, "NVS save OK");
+                    kx_param_store_print_active_samplings();
                 } else {
                     ESP_LOGW(TAG, "NVS save failed: %s", esp_err_to_name(nvs_err));
                 }
