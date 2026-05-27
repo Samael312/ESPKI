@@ -255,6 +255,7 @@ static void _process_single_control(cJSON *ctrl_json, int hint_control_id)
     } else {
         ESP_LOGI(TAG, "ctrl=%d: ts up-to-date (%.3f) — using cached entities",
                  control_id, ts_stored);
+        kx_param_store_print_active_samplings();
     }
 
     if (need_discovery) {

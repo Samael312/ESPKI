@@ -49,3 +49,4 @@ void kx_config_handle(const char *topic, const char *payload, size_t len);
 // Llamado internamente tras recibir el device.json, pero también
 // puede invocarse desde main si se quiere forzar la descarga.
 void kx_config_request_controls(void);
+void kx_param_store_print_active_samplings(void);

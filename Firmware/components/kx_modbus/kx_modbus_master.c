@@ -148,10 +148,10 @@ static inline bool _pending_test(int param_id) {
 // Solo se procesan params con sampling > 0.
 // El período máximo de sampling soportado es 60 s.
 // =============================================================
-#define REPORT_TICK_PERIOD_S   60     // máximo sampling posible
+#define REPORT_TICK_PERIOD_S   65     // máximo sampling posible
 #define REPORT_TASK_PERIOD_MS  1000   // resolución: 1 segundo
 
-static volatile int64_t s_report_tick_s = 0; // [0 .. REPORT_TICK_PERIOD_S-1]
+static volatile int64_t s_report_tick_s = -1;
 
 // =============================================================
 // Umbral de cambio (status)
@@ -737,20 +737,6 @@ static void _report_task(void *arg)
         
         ESP_LOGD(TAG, "report tick=%" PRId64 "s", tick);
 
-        // Filtrar rápido: solo procesar si el tick es múltiplo de algún
-        // sampling típico para no hacer foreach cada segundo sin necesidad.
-        // Los samplings no estándar (p.ej. 7, 11) siempre pasan el filtro
-        // en tick==0 (múltiplo de cualquier entero positivo).
-        static const int common_samplings[] = {5, 10, 15, 20, 30, 60, 0};
-        bool tick_relevant = (tick == 0); // tick 0 → siempre relevante
-        if (!tick_relevant) {
-            for (int k = 0; common_samplings[k]; k++) {
-                if (tick % common_samplings[k] == 0) { tick_relevant = true; break; }
-            }
-        }
-
-        if (!tick_relevant) continue;
-
         // Esperar que el bus esté disponible (respeta pause)
         xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
                             pdFALSE, pdTRUE, portMAX_DELAY);
@@ -759,7 +745,7 @@ static void _report_task(void *arg)
         kx_param_store_foreach(_report_param_cb, &rctx);
 
         if (rctx.sent > 0 || rctx.errors > 0) {
-            ESP_LOGI(TAG, "report tick=%" PRId64 "s sent=%d errors=%d heap=%" PRIu32,
+            ESP_LOGW(TAG, "report tick=%" PRId64 "s sent=%d errors=%d heap=%" PRIu32,
                      tick, rctx.sent, rctx.errors, kx_system_heap_free());
         }
     }
@@ -994,7 +980,6 @@ static void _modbus_task(void *arg)
 
             KX_LOG_CYCLE_START(TAG, 0, kx_param_store_count(), ctx.total);
 
-            // Iterar param a param soltando mutex entre lecturas
             _poll_foreach_ud_t ud = { .ctx = &ctx };
             kx_param_store_foreach(_poll_param_cb, &ud);
 
@@ -1030,10 +1015,21 @@ static void _modbus_task(void *arg)
         int batch_ok      = 0;
         int batch_errors  = 0;
         int batch_dropped = 0;
+        int pub_hwm       = 0;
+        int demand_hwm    = 0;
+        int write_hwm     = 0;
 
         for (int i = 0; i < valid_count && s_running; i++) {
             int param_id = snapshot[i].param_id;
             results[i].param_id = param_id;
+
+            // Capturar HWM
+            int pq = (int)uxQueueMessagesWaiting(s_pub_queue);
+            int dq = (int)uxQueueMessagesWaiting(s_demand_queue);
+            int wq = (int)uxQueueMessagesWaiting(s_write_queue);
+            if (pq > pub_hwm)    pub_hwm    = pq;
+            if (dq > demand_hwm) demand_hwm = dq;
+            if (wq > write_hwm)  write_hwm  = wq;
 
             if (!kx_mqtt_is_connected() || !kx_param_store_is_ready()) {
                 snprintf(results[i].err_msg, sizeof(results[i].err_msg),
@@ -1048,7 +1044,6 @@ static void _modbus_task(void *arg)
             xEventGroupWaitBits(s_poll_eg, POLL_ALLOWED_BIT,
                                 pdFALSE, pdTRUE, portMAX_DELAY);
 
-            // _poll_single_param ya toma/suelta el mutex internamente
             bool ok      = false;
             bool dropped = false;
 
@@ -1075,7 +1070,6 @@ static void _modbus_task(void *arg)
             if (batch_mode)
                 _print_batch_progress(i + 1, valid_count, batch_ok, batch_errors);
 
-            // Pausa inter-param → ventana para el writer
             if (i + 1 < valid_count)
                 vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_PARAM_MS));
         }
@@ -1094,12 +1088,12 @@ static void _modbus_task(void *arg)
         printf("│  Drops MQTT  : %-5d                                          │\n", batch_dropped);
         printf("│  Heap libre  : %-8lu bytes                                │\n",
                (unsigned long)kx_system_heap_free());
-        printf("│  pub_queue   : %-5d / %-5d slots usados                     │\n",
-               (int)uxQueueMessagesWaiting(s_pub_queue), PUB_QUEUE_SIZE);
-        printf("│  demand_queue: %-5d / %-5d slots pendientes                 │\n",
-               (int)uxQueueMessagesWaiting(s_demand_queue), DEMAND_QUEUE_SIZE);
-        printf("│  write_queue : %-5d / %-5d slots pendientes                 │\n",
-               (int)uxQueueMessagesWaiting(s_write_queue), WRITE_QUEUE_SIZE);
+        printf("│  pub_queue   : hwm=%-3d / %-5d slots                        │\n",
+               pub_hwm, PUB_QUEUE_SIZE);
+        printf("│  demand_queue: hwm=%-3d / %-5d slots                        │\n",
+               demand_hwm, DEMAND_QUEUE_SIZE);
+        printf("│  write_queue : hwm=%-3d / %-5d slots                        │\n",
+               write_hwm, WRITE_QUEUE_SIZE);
 
         if (batch_ok > 0) {
             printf("├──────────────────────────────────────────────────────────────┤\n");
@@ -1216,7 +1210,8 @@ esp_err_t kx_modbus_master_start(void)
 
     esp_err_t err = _uart_init();
     if (err != ESP_OK) { ESP_LOGE(TAG, "UART init: %s", esp_err_to_name(err)); return err; }
-
+    
+    s_running = true;
     BaseType_t ret;
 
     // Publisher (baja prioridad — solo MQTT, no toca el bus)
@@ -1233,8 +1228,6 @@ esp_err_t kx_modbus_master_start(void)
     ret = xTaskCreate(_report_task, "kx_report", 4096, NULL,
                       KX_TASK_PRIO_TELEMETRY, NULL);
     if (ret != pdPASS) { ESP_LOGE(TAG, "report task failed"); return ESP_FAIL; }
-
-    s_running = true;
 
     // Poll task — prioridad alta pero menor que el writer
     ret = xTaskCreate(_modbus_task, "kx_modbus", 8192, NULL,
