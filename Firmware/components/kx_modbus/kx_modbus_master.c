@@ -148,7 +148,7 @@ static inline bool _pending_test(int param_id) {
 // Solo se procesan params con sampling > 0.
 // El período máximo de sampling soportado es 60 s.
 // =============================================================
-#define REPORT_TICK_PERIOD_S   65     // máximo sampling posible
+#define REPORT_TICK_PERIOD_S   864000     // máximo sampling posible
 #define REPORT_TASK_PERIOD_MS  1000   // resolución: 1 segundo
 
 static volatile int64_t s_report_tick_s = -1;

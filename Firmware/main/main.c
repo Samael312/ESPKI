@@ -151,8 +151,6 @@ static int _parse_get_param_id(const char *payload, size_t len)
 // ── Router de mensajes MQTT entrantes ─────────────────────────
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
-    ESP_LOGI(TAG, "RAW RX topic=[%s] len=%d payload=%.80s", 
-             topic, (int)len, payload);  // TEMPORAL
     
     if (!_is_quiiot_entities_topic(topic)) {
         ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
