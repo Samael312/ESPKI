@@ -152,7 +152,6 @@ static inline bool _pending_test(int param_id) {
 #define REPORT_TASK_PERIOD_MS  1000   // resolución: 1 segundo
 
 static volatile int64_t s_report_tick_s = -1;
-static volatile int64_t s_report_tick_s = -1;
 
 // =============================================================
 // Umbral de cambio (status)
@@ -747,7 +746,6 @@ static void _report_task(void *arg)
 
         if (rctx.sent > 0 || rctx.errors > 0) {
             ESP_LOGW(TAG, "report tick=%" PRId64 "s sent=%d errors=%d heap=%" PRIu32,
-            ESP_LOGW(TAG, "report tick=%" PRId64 "s sent=%d errors=%d heap=%" PRIu32,
                      tick, rctx.sent, rctx.errors, kx_system_heap_free());
         }
     }
@@ -1020,21 +1018,10 @@ static void _modbus_task(void *arg)
         int pub_hwm       = 0;
         int demand_hwm    = 0;
         int write_hwm     = 0;
-        int pub_hwm       = 0;
-        int demand_hwm    = 0;
-        int write_hwm     = 0;
 
         for (int i = 0; i < valid_count && s_running; i++) {
             int param_id = snapshot[i].param_id;
             results[i].param_id = param_id;
-
-            // Capturar HWM
-            int pq = (int)uxQueueMessagesWaiting(s_pub_queue);
-            int dq = (int)uxQueueMessagesWaiting(s_demand_queue);
-            int wq = (int)uxQueueMessagesWaiting(s_write_queue);
-            if (pq > pub_hwm)    pub_hwm    = pq;
-            if (dq > demand_hwm) demand_hwm = dq;
-            if (wq > write_hwm)  write_hwm  = wq;
 
             // Capturar HWM
             int pq = (int)uxQueueMessagesWaiting(s_pub_queue);
@@ -1101,12 +1088,6 @@ static void _modbus_task(void *arg)
         printf("│  Drops MQTT  : %-5d                                          │\n", batch_dropped);
         printf("│  Heap libre  : %-8lu bytes                                │\n",
                (unsigned long)kx_system_heap_free());
-        printf("│  pub_queue   : hwm=%-3d / %-5d slots                        │\n",
-               pub_hwm, PUB_QUEUE_SIZE);
-        printf("│  demand_queue: hwm=%-3d / %-5d slots                        │\n",
-               demand_hwm, DEMAND_QUEUE_SIZE);
-        printf("│  write_queue : hwm=%-3d / %-5d slots                        │\n",
-               write_hwm, WRITE_QUEUE_SIZE);
         printf("│  pub_queue   : hwm=%-3d / %-5d slots                        │\n",
                pub_hwm, PUB_QUEUE_SIZE);
         printf("│  demand_queue: hwm=%-3d / %-5d slots                        │\n",
@@ -1229,8 +1210,6 @@ esp_err_t kx_modbus_master_start(void)
 
     esp_err_t err = _uart_init();
     if (err != ESP_OK) { ESP_LOGE(TAG, "UART init: %s", esp_err_to_name(err)); return err; }
-    
-    s_running = true;
     
     s_running = true;
     BaseType_t ret;
