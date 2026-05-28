@@ -11,15 +11,22 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include <string.h>
+#include <float.h>
 
 static const char *TAG = "main";
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
+
+// Tiempo mínimo (ms) entre lecturas Modbus reales para un mismo param_id.
+// Si la última lectura fue hace menos de este tiempo, se sirve el valor
+// del hash directamente sin encolar demanda al bus.
+#define KX_GET_CACHE_TTL_MS  10000
 
 static EventGroupHandle_t s_wifi_events;
 static int s_wifi_retry = 0;
@@ -102,6 +109,7 @@ static esp_err_t _wifi_init_sta(void)
     return ESP_FAIL;
 }
 
+// ── Helpers de topic ──────────────────────────────────────────
 static inline bool _is_quiiot_entities_topic(const char *topic)
 {
     return (strncmp(topic, "quiiot/", 7) == 0 &&
@@ -124,16 +132,16 @@ static bool _topic_last_segment_ends_with_set(const char *topic)
 static int _parse_get_param_id(const char *payload, size_t len)
 {
     if (!payload || len == 0) return 0;
- 
+
     cJSON *root = cJSON_ParseWithLength(payload, len);
     if (!root) {
         ESP_LOGW(TAG, "get payload: JSON parse failed (%.40s)", payload);
         return 0;
     }
- 
+
     // Normalizar: si es array, tomar el primer elemento
     cJSON *obj = cJSON_IsArray(root) ? cJSON_GetArrayItem(root, 0) : root;
- 
+
     int param_id = 0;
     if (obj) {
         cJSON *id_item = cJSON_GetObjectItem(obj, "id");
@@ -143,15 +151,91 @@ static int _parse_get_param_id(const char *payload, size_t len)
             ESP_LOGW(TAG, "get payload: no numeric 'id' field in: %.60s", payload);
         }
     }
- 
+
     cJSON_Delete(root);
     return param_id;
 }
 
-// ── Router de mensajes MQTT entrantes ─────────────────────────
+// =============================================================
+// Contexto para la búsqueda del control_id de un param_id dado.
+// Se usa en _try_serve_from_cache mediante kx_param_store_foreach.
+// =============================================================
+typedef struct {
+    int  target_param_id;
+    int  found_ctrl_id;
+} _cache_find_ctx_t;
+
+static void _cache_find_ctrl_cb(int ctrl_id, const kx_param_t *param, void *ud)
+{
+    _cache_find_ctx_t *ctx = (_cache_find_ctx_t *)ud;
+    if (ctx->found_ctrl_id < 0 && param->param_id == ctx->target_param_id) {
+        ctx->found_ctrl_id = ctrl_id;
+    }
+}
+
+// =============================================================
+// _try_serve_from_cache
+//
+// Comprueba si el param_id pedido tiene un valor leído hace
+// menos de KX_GET_CACHE_TTL_MS milisegundos en el hash.
+//
+//   · param_id == 0  → ciclo completo solicitado; nunca cachear.
+//   · ts_last_read == 0  → nunca leído; ir a Modbus.
+//   · last_published_value == FLT_MAX  → sin valor previo; ir a Modbus.
+//   · age < TTL  → publicar el valor almacenado y devolver true.
+//   · age >= TTL → devolver false (se encola demanda normal).
+//
+// Llamado exclusivamente desde _on_mqtt_message, que corre en
+// la tarea kx_processing (un solo hilo) → sin races.
+// =============================================================
+static bool _try_serve_from_cache(int param_id)
+{
+    // Ciclo completo: nunca servir desde caché
+    if (param_id == 0) return false;
+
+    // Buscar el control que contiene este param_id
+    _cache_find_ctx_t ctx = {
+        .target_param_id = param_id,
+        .found_ctrl_id   = -1,
+    };
+    kx_param_store_foreach(_cache_find_ctrl_cb, &ctx);
+
+    if (ctx.found_ctrl_id < 0) {
+        ESP_LOGD(TAG, "cache: param_id=%d not found in store", param_id);
+        return false;
+    }
+
+    const kx_param_t *p = kx_param_store_get_param(ctx.found_ctrl_id, param_id);
+    if (!p) return false;
+
+    // Sin lectura previa → ir a Modbus
+    if (p->ts_last_read == 0 || p->last_published_value == FLT_MAX) {
+        ESP_LOGD(TAG, "cache MISS param_id=%d (never read)", param_id);
+        return false;
+    }
+
+    int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
+    int64_t age_ms = now_ms - p->ts_last_read;
+
+    if (age_ms >= KX_GET_CACHE_TTL_MS) {
+        ESP_LOGD(TAG, "cache EXPIRED param_id=%d age=%" PRId64 "ms (ttl=%d ms)",
+                 param_id, age_ms, KX_GET_CACHE_TTL_MS);
+        return false;
+    }
+
+    // Caché válida: publicar sin tocar el bus
+    // ESP_LOGI(TAG, "cache HIT  param_id=%d ctrl=%d age=%" PRId64 "ms value=%.3f",
+    //          param_id, ctx.found_ctrl_id, age_ms, p->last_published_value);
+
+    kx_param_pub_status(ctx.found_ctrl_id, param_id, p->last_published_value);
+    return true;
+}
+
+// =============================================================
+// Router de mensajes MQTT entrantes
+// =============================================================
 static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
 {
-    
     if (!_is_quiiot_entities_topic(topic)) {
         ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
                 topic, len, kx_system_heap_free());
@@ -169,10 +253,14 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
         } else {
             const char *last_slash = strrchr(topic, '/');
             if (last_slash && strcmp(last_slash + 1, "get") == 0) {
-                // Bloque 2: get → polling del param pedido (o ciclo completo si id=0)
+                // Bloque 2: get → intentar caché primero, Modbus si expirada
                 int param_id = _parse_get_param_id(payload, len);
                 ESP_LOGD(TAG, "entities/get param_id=%d", param_id);
-                kx_modbus_request_poll(param_id);
+
+                if (!_try_serve_from_cache(param_id)) {
+                    // Caché vacía o expirada → lectura Modbus normal
+                    kx_modbus_request_poll(param_id);
+                }
             } else {
                 // Bloque 3: otro sub-topic → ignorar
                 ESP_LOGD(TAG, "entities topic ignorado: %s", topic);
@@ -230,6 +318,7 @@ static void _print_boot_banner(bool from_cache)
     ESP_LOGI(TAG, "║  UUID: %.8s...                  ║", KX_DEVICE_UUID);
     ESP_LOGI(TAG, "║  Cache: %-28s ║",
              from_cache ? "controls+entities from NVS" : "will download via MQTT");
+    ESP_LOGI(TAG, "║  Get TTL: %-26dms ║", KX_GET_CACHE_TTL_MS);
     ESP_LOGI(TAG, "║  Protocol: Modbus RTU               ║");
     ESP_LOGI(TAG, "╚══════════════════════════════════════╝");
 }
@@ -263,9 +352,10 @@ void app_main(void)
     // 7. Modbus RTU
     ESP_ERROR_CHECK(kx_modbus_master_start());
 
-    ESP_LOGI(TAG, "init done — device_id=%s fw=%s cache=%s",
+    ESP_LOGI(TAG, "init done — device_id=%s fw=%s cache=%s get_ttl=%dms",
              kx_system_device_id(), KX_FW_VERSION,
-             from_cache ? "yes" : "no");
+             from_cache ? "yes" : "no",
+             KX_GET_CACHE_TTL_MS);
 
     while (1) {
         ESP_LOGI(TAG, "heap=%lu mqtt=%s modbus=%s controls=%d",
