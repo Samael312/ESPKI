@@ -25,8 +25,11 @@ static const char *TAG = "kx_param_store";
 #define NVS_MAGIC_VALUE  0xE5712A04U
 
 #define NVS_MAX_BLOB      3840U
-#define NVS_CHUNK_PARAMS  (NVS_MAX_BLOB / sizeof(kx_param_t)) 
-#define NVS_PARTITION  "storage"
+#define NVS_CHUNK_PARAMS  (NVS_MAX_BLOB / sizeof(kx_param_t))
+#define NVS_PARTITION     "storage"
+
+// El nivel 3 (kx_reg_hash_t) NO se persiste en NVS: se reconstruye
+// automáticamente al insertar cada kx_param_t (vía _param_insert).
 
 typedef struct {
     int    control_id;
@@ -45,7 +48,7 @@ static int                    s_expected    = 0;
 static kx_param_progress_cb_t s_progress_cb = NULL;
 
 // =============================================================
-// Asignador PSRAM con fallback
+// Asignador PSRAM con fallback a RAM interna
 // =============================================================
 static void *_psram_alloc(size_t size)
 {
@@ -55,7 +58,7 @@ static void *_psram_alloc(size_t size)
 }
 
 // =============================================================
-// Funciones hash
+// ── NIVEL 1 — funciones de hash de controles ─────────────────
 // =============================================================
 static inline uint32_t _ctrl_hash(int control_id)
 {
@@ -66,6 +69,9 @@ static inline uint32_t _ctrl_hash(int control_id)
     return k & (KX_CTRL_HASH_BUCKETS - 1);
 }
 
+// =============================================================
+// ── NIVEL 2 — funciones de hash de params ────────────────────
+// =============================================================
 static inline uint32_t _param_hash(int param_id)
 {
     uint32_t k = (uint32_t)param_id;
@@ -76,7 +82,145 @@ static inline uint32_t _param_hash(int param_id)
 }
 
 // =============================================================
-// Operaciones sobre hash de controles (nivel 1)
+// ── NIVEL 3 — funciones de hash de registros Modbus ──────────
+//
+// La clave compuesta se empaqueta en un uint32_t:
+//   bits[31:16] = reg       (dirección del registro)
+//   bits[15: 8] = fc_read   (función de lectura,  0 si ninguna)
+//   bits[ 7: 0] = fc_write  (función de escritura, 0 si ninguna)
+//
+// El hash distingue entradas que comparten la misma dirección
+// de registro pero difieren en función de lectura o escritura,
+// y también indexa registros sin ninguna función asignada (fc=0).
+// =============================================================
+
+// Genera el índice de bucket a partir de la clave compuesta.
+// Usa el mismo algoritmo Murmur3-finalizer que los niveles 1 y 2
+// para coherencia y rendimiento demostrado en ESP32.
+static inline uint32_t _reg_hash_fn(uint16_t reg,
+                                     uint8_t  fc_read,
+                                     uint8_t  fc_write)
+{
+    // Empaquetar en 32 bits para un solo paso de hashing
+    uint32_t k = ((uint32_t)reg     << 16)
+               | ((uint32_t)fc_read <<  8)
+               |  (uint32_t)fc_write;
+
+    // Murmur3 finalizer — buen avalanche effect con claves pequeñas
+    k ^= (k >> 16);
+    k  = (k * 0x45d9f3bU) & 0xFFFFFFFFU;
+    k ^= (k >> 16);
+    k  = (k * 0x45d9f3bU) & 0xFFFFFFFFU;
+    k ^= (k >> 16);
+
+    // Máscara a KX_REG_HASH_BUCKETS — DEBE ser potencia de 2
+    return k & (KX_REG_HASH_BUCKETS - 1);
+}
+
+// Comprueba si la clave de una entrada coincide con la buscada.
+static inline bool _reg_key_eq(const kx_reg_key_t *a,
+                                uint16_t reg,
+                                uint8_t  fc_read,
+                                uint8_t  fc_write)
+{
+    return (a->reg      == reg)
+        && (a->fc_read  == fc_read)
+        && (a->fc_write == fc_write);
+}
+
+// ── Búsqueda interna (mutable) ────────────────────────────────
+static kx_reg_entry_t *_reg_find_mutable(kx_reg_hash_t *rh,
+                                          uint16_t reg,
+                                          uint8_t  fc_read,
+                                          uint8_t  fc_write)
+{
+    uint32_t idx = _reg_hash_fn(reg, fc_read, fc_write);
+    kx_reg_node_t *node = rh->buckets[idx];
+
+    while (node) {
+        if (_reg_key_eq(&node->entry.key, reg, fc_read, fc_write))
+            return &node->entry;
+        node = node->next;
+    }
+    return NULL;
+}
+
+// ── Búsqueda interna (inmutable) ─────────────────────────────
+static const kx_reg_entry_t *_reg_find(const kx_reg_hash_t *rh,
+                                        uint16_t reg,
+                                        uint8_t  fc_read,
+                                        uint8_t  fc_write)
+{
+    return _reg_find_mutable((kx_reg_hash_t *)rh, reg, fc_read, fc_write);
+}
+
+// ── Inserción de un registro nuevo (valores iniciales) ────────
+//
+// Se llama SIEMPRE desde _param_insert para garantizar que
+// TODOS los registros — incluyendo aquellos con fc_read=0 o
+// fc_write=0 — estén presentes en el nivel 3.
+//
+// Si la clave ya existe (otro param comparte el mismo triplete),
+// la función retorna la entrada existente sin modificarla:
+// el valor y los timestamps solo los actualiza el driver Modbus.
+//
+// Retorna puntero a la entrada (nueva o existente), NULL si OOM.
+static kx_reg_entry_t *_reg_ensure(kx_reg_hash_t *rh,
+                                    uint16_t reg,
+                                    uint8_t  fc_read,
+                                    uint8_t  fc_write)
+{
+    // 1. ¿Ya existe esta clave compuesta?
+    kx_reg_entry_t *existing = _reg_find_mutable(rh, reg, fc_read, fc_write);
+    if (existing) return existing;   // reusar — NO resetear valores
+
+    // 2. Crear nodo nuevo
+    kx_reg_node_t *node = _psram_alloc(sizeof(kx_reg_node_t));
+    if (!node) {
+        ESP_LOGE(TAG, "reg_hash OOM: reg=0x%04x fc_r=%u fc_w=%u",
+                 reg, fc_read, fc_write);
+        return NULL;
+    }
+
+    // Inicializar clave
+    node->entry.key.reg      = reg;
+    node->entry.key.fc_read  = fc_read;
+    node->entry.key.fc_write = fc_write;
+
+    // Inicializar estado de lectura: "nunca leído"
+    node->entry.value        = FLT_MAX;
+    node->entry.ts_last_read = 0;
+
+    // Inicializar estado de escritura: "nunca escrito"
+    node->entry.last_write_value = FLT_MAX;
+    node->entry.ts_last_write    = 0;
+
+    // Insertar en la cabeza de la lista del bucket (O(1))
+    uint32_t idx = _reg_hash_fn(reg, fc_read, fc_write);
+    node->next        = rh->buckets[idx];
+    rh->buckets[idx]  = node;
+    rh->count++;
+
+    return &node->entry;
+}
+
+// ── Liberación completa de todos los nodos del nivel 3 ────────
+static void _reg_clear_all(kx_reg_hash_t *rh)
+{
+    for (int i = 0; i < KX_REG_HASH_BUCKETS; i++) {
+        kx_reg_node_t *node = rh->buckets[i];
+        while (node) {
+            kx_reg_node_t *tmp = node->next;
+            free(node);
+            node = tmp;
+        }
+        rh->buckets[i] = NULL;
+    }
+    rh->count = 0;
+}
+
+// =============================================================
+// ── NIVEL 1 — operaciones sobre el hash de controles ─────────
 // =============================================================
 static kx_control_t *_ctrl_find_or_create(int control_id)
 {
@@ -85,6 +229,7 @@ static kx_control_t *_ctrl_find_or_create(int control_id)
 
     while (node) {
         if (node->ctrl.control_id == control_id) {
+            // Reinicializar nivel 2 (params)
             for (int b = 0; b < KX_PARAM_HASH_BUCKETS; b++) {
                 kx_param_node_t *pn = node->ctrl.params.buckets[b];
                 while (pn) {
@@ -95,6 +240,10 @@ static kx_control_t *_ctrl_find_or_create(int control_id)
                 node->ctrl.params.buckets[b] = NULL;
             }
             node->ctrl.params.count   = 0;
+
+            // Reinicializar nivel 3 (registros)
+            _reg_clear_all(&node->ctrl.regs);
+
             node->ctrl.entities_ready = false;
             return &node->ctrl;
         }
@@ -102,7 +251,8 @@ static kx_control_t *_ctrl_find_or_create(int control_id)
     }
 
     if (s_hash.count >= KX_PARAM_MAX_CONTROLS) {
-        ESP_LOGE(TAG, "hash full: %d controls (max %d)", s_hash.count, KX_PARAM_MAX_CONTROLS);
+        ESP_LOGE(TAG, "hash full: %d controls (max %d)",
+                 s_hash.count, KX_PARAM_MAX_CONTROLS);
         return NULL;
     }
 
@@ -113,6 +263,7 @@ static kx_control_t *_ctrl_find_or_create(int control_id)
     }
     memset(new_node, 0, sizeof(kx_ctrl_node_t));
     new_node->ctrl.control_id = control_id;
+    // params.buckets y regs.buckets quedan a NULL (memset)
 
     new_node->next      = s_hash.buckets[idx];
     s_hash.buckets[idx] = new_node;
@@ -135,30 +286,39 @@ static kx_control_t *_ctrl_find(int control_id)
 }
 
 // =============================================================
-// Operaciones sobre hash de params (nivel 2)
+// ── NIVEL 2 — operaciones sobre el hash de params ────────────
 // =============================================================
 static esp_err_t _param_insert(kx_control_t *ctrl, const kx_param_t *param)
 {
+    // ── 1. Insertar / actualizar en el hash de params (nivel 2) ──
     uint32_t idx = _param_hash(param->param_id);
     kx_param_node_t *node = ctrl->params.buckets[idx];
 
     while (node) {
         if (node->param.param_id == param->param_id) {
-            // Preservar campos de runtime antes de sobrescribir la config
-            int64_t saved_ts_last_read         = node->param.ts_last_read;
-            float   saved_last_published_value = node->param.last_published_value;
+            // Preservar campos de runtime antes de sobrescribir config
+            int64_t saved_ts   = node->param.ts_last_read;
+            float   saved_lpv  = node->param.last_published_value;
 
             memcpy(&node->param, param, sizeof(kx_param_t));
 
-            node->param.ts_last_read         = saved_ts_last_read;
-            node->param.last_published_value = saved_last_published_value;
+            node->param.ts_last_read         = saved_ts;
+            node->param.last_published_value = saved_lpv;
+
+            // ── 2. Nivel 3: garantizar que el registro sigue indexado ──
+            // (puede cambiar fc_read/fc_write en un re-parse)
+            _reg_ensure(&ctrl->regs,
+                        (uint16_t)param->reg,
+                        (uint8_t)param->function_read,
+                        (uint8_t)param->function_write);
             return ESP_OK;
         }
         node = node->next;
     }
 
     if (ctrl->params.count >= KX_PARAM_MAX_PER_CONTROL) {
-        ESP_LOGW(TAG, "ctrl %d: param limit reached (%d)", ctrl->control_id, KX_PARAM_MAX_PER_CONTROL);
+        ESP_LOGW(TAG, "ctrl %d: param limit reached (%d)",
+                 ctrl->control_id, KX_PARAM_MAX_PER_CONTROL);
         return ESP_ERR_NO_MEM;
     }
 
@@ -170,12 +330,38 @@ static esp_err_t _param_insert(kx_control_t *ctrl, const kx_param_t *param)
     memcpy(&new_node->param, param, sizeof(kx_param_t));
 
     // Inicializar campos de runtime para nodos nuevos
-    new_node->param.ts_last_read         = 0;       // nunca leído → leer en primer ciclo
-    new_node->param.last_published_value = FLT_MAX; // nunca publicado → publicar en primer ciclo
+    new_node->param.ts_last_read         = 0;       // nunca leído
+    new_node->param.last_published_value = FLT_MAX; // nunca publicado
 
     new_node->next            = ctrl->params.buckets[idx];
     ctrl->params.buckets[idx] = new_node;
     ctrl->params.count++;
+
+    // ── 2. Nivel 3: registrar el par (reg, fc_read, fc_write) ────
+    // Se indexan TODOS los registros sin discriminar si fc_read
+    // o fc_write son 0 (requisito: hash completo de registros).
+    kx_reg_entry_t *reg_entry = _reg_ensure(
+        &ctrl->regs,
+        (uint16_t)param->reg,
+        (uint8_t)param->function_read,
+        (uint8_t)param->function_write
+    );
+
+    if (reg_entry) {
+        ESP_LOGD(TAG,
+                 "reg_hash: ctrl=%d  reg=0x%04x fc_r=%u fc_w=%u  "
+                 "(reg_entries=%d)",
+                 ctrl->control_id,
+                 (unsigned)param->reg,
+                 (unsigned)param->function_read,
+                 (unsigned)param->function_write,
+                 ctrl->regs.count);
+    } else {
+        // No es fatal: el param ya está guardado en nivel 2
+        ESP_LOGW(TAG, "reg_hash: OOM for ctrl=%d param=%d — reg index skipped",
+                 ctrl->control_id, param->param_id);
+    }
+
     return ESP_OK;
 }
 
@@ -190,8 +376,6 @@ static const kx_param_t *_param_find(const kx_control_t *ctrl, int param_id)
     return NULL;
 }
 
-// Versión mutable — usada por kx_modbus_master para actualizar
-// ts_last_read y last_published_value sin copias adicionales.
 static kx_param_t *_param_find_mutable(kx_control_t *ctrl, int param_id)
 {
     uint32_t idx = _param_hash(param_id);
@@ -223,11 +407,10 @@ static int _get_int(cJSON *obj, const char *key, int def)
 static void _get_str(cJSON *obj, const char *key, char *buf, size_t len)
 {
     cJSON *item = cJSON_GetObjectItem(obj, key);
-    if (item && cJSON_IsString(item) && item->valuestring) {
+    if (item && cJSON_IsString(item) && item->valuestring)
         snprintf(buf, len, "%s", item->valuestring);
-    } else {
+    else
         buf[0] = '\0';
-    }
 }
 
 // =============================================================
@@ -242,22 +425,18 @@ static void _print_progress(int control_id, int done, int total)
     int filled = (done * PROGRESS_BAR_WIDTH) / total;
 
     char bar[PROGRESS_BAR_WIDTH + 1];
-    for (int i = 0; i < PROGRESS_BAR_WIDTH; i++) {
+    for (int i = 0; i < PROGRESS_BAR_WIDTH; i++)
         bar[i] = (i < filled) ? '#' : '-';
-    }
     bar[PROGRESS_BAR_WIDTH] = '\0';
 
     printf("\r[entities] ctrl=%d [%s] %3d%% (%d/%d params)",
            control_id, bar, pct, done, total);
     fflush(stdout);
 
-    if (done >= total) {
-        printf("\n");
-        fflush(stdout);
-    }
+    if (done >= total) { printf("\n"); fflush(stdout); }
 }
 
-// ── Inicialización de la partición (llamar desde kx_param_store_init) ──
+// ── Init de la partición NVS de almacenamiento ────────────────
 static void _nvs_storage_init(void)
 {
     esp_err_t err = nvs_flash_init_partition(NVS_PARTITION);
@@ -267,10 +446,10 @@ static void _nvs_storage_init(void)
         nvs_flash_erase_partition(NVS_PARTITION);
         err = nvs_flash_init_partition(NVS_PARTITION);
     }
-    if (err != ESP_OK) {
+    if (err != ESP_OK)
         ESP_LOGE(TAG, "storage partition init failed: %s", esp_err_to_name(err));
-    }
 }
+
 // =============================================================
 // API pública — ciclo de vida
 // =============================================================
@@ -278,10 +457,14 @@ void kx_param_store_init(void)
 {
     if (s_initialized) return;
     memset(&s_hash, 0, sizeof(s_hash));
-    _nvs_storage_init(); 
+    _nvs_storage_init();
     s_initialized = true;
-    ESP_LOGI(TAG, "hash store initialized (ctrl_buckets=%d param_buckets=%d)",
-             KX_CTRL_HASH_BUCKETS, KX_PARAM_HASH_BUCKETS);
+    ESP_LOGI(TAG,
+             "hash store initialized "
+             "(ctrl_buckets=%d param_buckets=%d reg_buckets=%d)",
+             KX_CTRL_HASH_BUCKETS,
+             KX_PARAM_HASH_BUCKETS,
+             KX_REG_HASH_BUCKETS);
 }
 
 // =============================================================
@@ -298,10 +481,7 @@ esp_err_t kx_param_store_parse(const char *payload, size_t len, int control_id)
     }
 
     kx_control_t *ctrl = _ctrl_find_or_create(control_id);
-    if (!ctrl) {
-        cJSON_Delete(root);
-        return ESP_FAIL;
-    }
+    if (!ctrl) { cJSON_Delete(root); return ESP_FAIL; }
 
     cJSON *regs = cJSON_GetObjectItem(root, "control_regs");
     if (!regs || !cJSON_IsArray(regs)) {
@@ -339,12 +519,12 @@ esp_err_t kx_param_store_parse(const char *payload, size_t len, int control_id)
         cJSON *add = cJSON_GetObjectItem(reg, "control_parameter_addition");
         p.addition = (add && cJSON_IsNumber(add)) ? (float)add->valuedouble : 0.0f;
 
-        // Los campos de runtime se inicializan en _param_insert
         p.ts_last_read         = 0;
         p.last_published_value = FLT_MAX;
 
         if (p.param_id <= 0) continue;
 
+        // _param_insert crea/actualiza el nivel 2 Y registra el nivel 3
         if (_param_insert(ctrl, &p) == ESP_OK) {
             inserted++;
             _print_progress(control_id, inserted, total);
@@ -353,18 +533,20 @@ esp_err_t kx_param_store_parse(const char *payload, size_t len, int control_id)
     }
 
     cJSON_Delete(root);
-
     ctrl->entities_ready = true;
 
-    ESP_LOGI(TAG, "control %d: stored %d/%d params | heap=%lu",
+    ESP_LOGI(TAG,
+             "control %d: stored %d/%d params | "
+             "reg_entries=%d | heap=%lu",
              control_id, inserted, total,
+             ctrl->regs.count,
              (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
 
     return ESP_OK;
 }
 
 // =============================================================
-// Consultas
+// ── API pública — consultas nivel 1 y 2 ──────────────────────
 // =============================================================
 const kx_control_t *kx_param_store_get_ctrl(int control_id)
 {
@@ -390,9 +572,7 @@ int kx_param_store_count(void)
     return s_hash.count;
 }
 
-// =============================================================
-// Iteración
-// =============================================================
+// ── Iteración nivel 2 ─────────────────────────────────────────
 void kx_param_store_foreach(kx_param_iter_cb_t cb, void *user_data)
 {
     if (!cb) return;
@@ -413,6 +593,143 @@ void kx_param_store_foreach(kx_param_iter_cb_t cb, void *user_data)
 }
 
 // =============================================================
+// ── API pública — Nivel 3 (caché de registros Modbus) ─────────
+// =============================================================
+
+// ── Actualizar tras una LECTURA exitosa del bus ───────────────
+kx_reg_entry_t *kx_param_store_reg_upsert_read(int      control_id,
+                                                uint16_t reg,
+                                                uint8_t  fc_read,
+                                                uint8_t  fc_write,
+                                                float    value,
+                                                int64_t  ts_ms)
+{
+    kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) {
+        ESP_LOGW(TAG, "reg_upsert_read: ctrl=%d not found", control_id);
+        return NULL;
+    }
+
+    // Buscar la entrada (fue creada al parsear, debería existir)
+    kx_reg_entry_t *entry = _reg_find_mutable(&ctrl->regs, reg, fc_read, fc_write);
+
+    if (!entry) {
+        // Caso inesperado: crear la entrada sobre la marcha
+        ESP_LOGW(TAG,
+                 "reg_upsert_read: entry not found for ctrl=%d "
+                 "reg=0x%04x fc_r=%u fc_w=%u — creating",
+                 control_id, reg, fc_read, fc_write);
+        entry = _reg_ensure(&ctrl->regs, reg, fc_read, fc_write);
+        if (!entry) return NULL;
+    }
+
+    entry->value        = value;
+    entry->ts_last_read = ts_ms;
+
+    ESP_LOGD(TAG,
+             "reg_read: ctrl=%d reg=0x%04x fc_r=%u → value=%.3f ts=%" PRId64,
+             control_id, reg, fc_read, value, ts_ms);
+    return entry;
+}
+
+// ── Actualizar tras una ESCRITURA exitosa en el bus ───────────
+esp_err_t kx_param_store_reg_upsert_write(int      control_id,
+                                           uint16_t reg,
+                                           uint8_t  fc_read,
+                                           uint8_t  fc_write,
+                                           float    value,
+                                           int64_t  ts_ms)
+{
+    kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) return ESP_ERR_NOT_FOUND;
+
+    kx_reg_entry_t *entry = _reg_find_mutable(&ctrl->regs, reg, fc_read, fc_write);
+    if (!entry) {
+        ESP_LOGW(TAG,
+                 "reg_upsert_write: no entry for ctrl=%d "
+                 "reg=0x%04x fc_r=%u fc_w=%u",
+                 control_id, reg, fc_read, fc_write);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    entry->last_write_value = value;
+    entry->ts_last_write    = ts_ms;
+
+    ESP_LOGD(TAG,
+             "reg_write: ctrl=%d reg=0x%04x fc_w=%u → value=%.3f ts=%" PRId64,
+             control_id, reg, fc_write, value, ts_ms);
+    return ESP_OK;
+}
+
+// ── Búsqueda de solo lectura ──────────────────────────────────
+const kx_reg_entry_t *kx_param_store_reg_get(int      control_id,
+                                               uint16_t reg,
+                                               uint8_t  fc_read,
+                                               uint8_t  fc_write)
+{
+    const kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) return NULL;
+    return _reg_find(&ctrl->regs, reg, fc_read, fc_write);
+}
+
+// ── Búsqueda mutable ─────────────────────────────────────────
+kx_reg_entry_t *kx_param_store_reg_get_mutable(int      control_id,
+                                                uint16_t reg,
+                                                uint8_t  fc_read,
+                                                uint8_t  fc_write)
+{
+    kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) return NULL;
+    return _reg_find_mutable(&ctrl->regs, reg, fc_read, fc_write);
+}
+
+// ── Número de entradas en el nivel 3 de un control ───────────
+int kx_param_store_reg_count(int control_id)
+{
+    const kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) return 0;
+    return ctrl->regs.count;
+}
+
+// ── Iteración sobre nivel 3 de un control ────────────────────
+void kx_param_store_reg_foreach(int control_id,
+                                 kx_reg_iter_cb_t cb,
+                                 void *user_data)
+{
+    if (!cb) return;
+    const kx_control_t *ctrl = _ctrl_find(control_id);
+    if (!ctrl) return;
+
+    for (int i = 0; i < KX_REG_HASH_BUCKETS; i++) {
+        kx_reg_node_t *node = ctrl->regs.buckets[i];
+        while (node) {
+            cb(control_id, &node->entry, user_data);
+            node = node->next;
+        }
+    }
+}
+
+// ── Iteración sobre nivel 3 de TODOS los controles ───────────
+void kx_param_store_reg_foreach_all(kx_reg_iter_cb_t cb, void *user_data)
+{
+    if (!cb) return;
+    for (int ci = 0; ci < KX_CTRL_HASH_BUCKETS; ci++) {
+        kx_ctrl_node_t *cn = s_hash.buckets[ci];
+        while (cn) {
+            kx_control_t *ctrl = &cn->ctrl;
+            for (int ri = 0; ri < KX_REG_HASH_BUCKETS; ri++) {
+                kx_reg_node_t *rn = ctrl->regs.buckets[ri];
+                while (rn) {
+                    cb(ctrl->control_id, &rn->entry, user_data);
+                    rn = rn->next;
+                }
+            }
+            cn = cn->next;
+        }
+    }
+}
+
+// =============================================================
 // Control de completitud
 // =============================================================
 void kx_param_store_set_expected(int count)
@@ -425,10 +742,6 @@ bool kx_param_store_is_ready(void)
 {
     if (s_expected <= 0) return false;
 
-    // Contar cuántos nodos tienen entities_ready == true.
-    // No exigimos s_hash.count == s_expected porque pueden existir
-    // nodos "fantasma" (p.ej. cargados desde NVS y luego borrados
-    // sus entities por update_ts) que no deben bloquear el arranque.
     int ready_count = 0;
     for (int ci = 0; ci < KX_CTRL_HASH_BUCKETS; ci++) {
         kx_ctrl_node_t *cn = s_hash.buckets[ci];
@@ -460,9 +773,8 @@ void kx_param_store_set_uuid(int control_id, const char *uuid)
     if (!s_initialized) kx_param_store_init();
     kx_control_t *ctrl = _ctrl_find(control_id);
     if (!ctrl) ctrl = _ctrl_find_or_create(control_id);
-    if (ctrl && uuid) {
+    if (ctrl && uuid)
         snprintf(ctrl->uuid, sizeof(ctrl->uuid), "%s", uuid);
-    }
 }
 
 // =============================================================
@@ -486,11 +798,18 @@ void kx_param_store_set_update_ts(int control_id, double ts)
     }
 }
 
+// =============================================================
+// kx_param_store_clear_entities
+//
+// Borra nivel 2 (params) Y nivel 3 (registros) del control
+// indicado, y marca entities_ready=false.
+// =============================================================
 void kx_param_store_clear_entities(int control_id)
 {
     kx_control_t *ctrl = _ctrl_find(control_id);
     if (!ctrl) return;
 
+    // Nivel 2: limpiar params
     for (int b = 0; b < KX_PARAM_HASH_BUCKETS; b++) {
         kx_param_node_t *pn = ctrl->params.buckets[b];
         while (pn) {
@@ -503,7 +822,14 @@ void kx_param_store_clear_entities(int control_id)
     ctrl->params.count   = 0;
     ctrl->entities_ready = false;
 
-    ESP_LOGI(TAG, "entities cleared for ctrl=%d (ts=%.3f)", control_id, ctrl->update_ts);
+    // Nivel 3: limpiar registro cache
+    int reg_count_before = ctrl->regs.count;
+    _reg_clear_all(&ctrl->regs);
+
+    ESP_LOGI(TAG,
+             "entities cleared for ctrl=%d (ts=%.3f) "
+             "— params=0 reg_entries=0 (was %d)",
+             control_id, ctrl->update_ts, reg_count_before);
 }
 
 // =============================================================
@@ -538,11 +864,17 @@ esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts)
 
 // =============================================================
 // Persistencia NVS
+//
+// El nivel 3 (kx_reg_hash_t) NO se persiste: se reconstruye
+// automáticamente a partir de los params al cargar desde NVS,
+// ya que _param_insert llama a _reg_ensure por cada param.
 // =============================================================
 bool kx_param_store_nvs_valid(void)
 {
     nvs_handle_t h;
-    if (nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE, NVS_READONLY, &h) != ESP_OK) return false;
+    if (nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE,
+                                NVS_READONLY, &h) != ESP_OK)
+        return false;
 
     uint32_t magic = 0;
     nvs_get_u32(h, NVS_KEY_MAGIC, &magic);
@@ -555,16 +887,19 @@ bool kx_param_store_nvs_valid(void)
     bool ok = (magic == NVS_MAGIC_VALUE)
            && (strcmp(uuid, KX_DEVICE_UUID) == 0);
 
-    ESP_LOGI(TAG, "nvs_valid=%d (magic=%08lx uuid=%s)", ok, (unsigned long)magic, uuid);
+    ESP_LOGI(TAG, "nvs_valid=%d (magic=%08lx uuid=%s)",
+             ok, (unsigned long)magic, uuid);
     return ok;
 }
 
 esp_err_t kx_param_store_save_nvs(void)
 {
-    if (!s_initialized || s_hash.count == 0) return ESP_ERR_INVALID_STATE;
+    if (!s_initialized || s_hash.count == 0)
+        return ESP_ERR_INVALID_STATE;
 
     nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE,
+                                            NVS_READWRITE, &h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs open rw failed: %s", esp_err_to_name(err));
         return err;
@@ -580,7 +915,7 @@ esp_err_t kx_param_store_save_nvs(void)
         kx_ctrl_node_t *cn = s_hash.buckets[ci];
         while (cn) {
             kx_control_t *ctrl = &cn->ctrl;
-            int total_params = ctrl->params.count;
+            int total_params   = ctrl->params.count;
 
             // ── Cabecera del control ──────────────────────────
             kx_nvs_ctrl_hdr_t hdr = {
@@ -597,17 +932,15 @@ esp_err_t kx_param_store_save_nvs(void)
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "nvs: hdr write %s failed: %s",
                          hdr_key, esp_err_to_name(err));
-                cn = cn->next;
-                ctrl_idx++;
+                cn = cn->next; ctrl_idx++;
                 continue;
             }
 
-            // ── Serializar params en un array temporal ────────
+            // ── Serializar params en array temporal ───────────
             kx_param_t *flat = malloc(total_params * sizeof(kx_param_t));
             if (!flat) {
-                ESP_LOGE(TAG, "OOM building flat params ctrl=%d", ctrl->control_id);
-                cn = cn->next;
-                ctrl_idx++;
+                ESP_LOGE(TAG, "OOM flat params ctrl=%d", ctrl->control_id);
+                cn = cn->next; ctrl_idx++;
                 continue;
             }
 
@@ -622,11 +955,11 @@ esp_err_t kx_param_store_save_nvs(void)
 
             // ── Guardar en chunks ─────────────────────────────
             int chunks = (total_params + NVS_CHUNK_PARAMS - 1) / NVS_CHUNK_PARAMS;
-            if (chunks == 0) chunks = 1;  // aunque sea 0 params, guardar cabecera
+            if (chunks == 0) chunks = 1;
 
             for (int j = 0; j < chunks; j++) {
-                int offset    = j * NVS_CHUNK_PARAMS;
-                int count     = total_params - offset;
+                int offset     = j * NVS_CHUNK_PARAMS;
+                int count      = total_params - offset;
                 if (count > (int)NVS_CHUNK_PARAMS) count = NVS_CHUNK_PARAMS;
                 size_t chunk_bytes = (size_t)count * sizeof(kx_param_t);
 
@@ -635,24 +968,25 @@ esp_err_t kx_param_store_save_nvs(void)
 
                 esp_err_t cerr = nvs_set_blob(h, chunk_key,
                                               flat + offset, chunk_bytes);
-                if (cerr != ESP_OK) {
+                if (cerr != ESP_OK)
                     ESP_LOGW(TAG, "nvs: chunk %s failed: %s",
                              chunk_key, esp_err_to_name(cerr));
-                } else {
+                else
                     ESP_LOGD(TAG, "nvs: chunk %s → %d params (%zu bytes)",
                              chunk_key, count, chunk_bytes);
-                }
             }
             free(flat);
 
-            // Guardar número de chunks para la carga
             char nchunks_key[16];
             snprintf(nchunks_key, sizeof(nchunks_key), "nc_%d", ctrl_idx);
             nvs_set_u8(h, nchunks_key, (uint8_t)chunks);
 
-            ESP_LOGI(TAG, "nvs: saved ctrl=%d uuid=%s ts=%.3f params=%d chunks=%d",
+            ESP_LOGI(TAG,
+                     "nvs: saved ctrl=%d uuid=%s ts=%.3f "
+                     "params=%d reg_entries=%d chunks=%d",
                      ctrl->control_id, ctrl->uuid,
-                     ctrl->update_ts, total_params, chunks);
+                     ctrl->update_ts, total_params,
+                     ctrl->regs.count, chunks);
 
             cn = cn->next;
             ctrl_idx++;
@@ -662,9 +996,8 @@ esp_err_t kx_param_store_save_nvs(void)
     err = nvs_commit(h);
     nvs_close(h);
 
-    if (err == ESP_OK) {
+    if (err == ESP_OK)
         ESP_LOGI(TAG, "nvs: commit OK — %d controls saved", s_hash.count);
-    }
     return err;
 }
 
@@ -673,7 +1006,8 @@ esp_err_t kx_param_store_load_nvs(void)
     if (!s_initialized) kx_param_store_init();
 
     nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE, NVS_READONLY, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE,
+                                            NVS_READONLY, &h);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "nvs open failed: %s", esp_err_to_name(err));
         return err;
@@ -741,16 +1075,21 @@ esp_err_t kx_param_store_load_nvs(void)
             kx_param_t *params  = (kx_param_t *)buf;
 
             for (int p = 0; p < params_in_chunk; p++) {
-                if (_param_insert(ctrl, &params[p]) == ESP_OK) total_loaded++;
+                // _param_insert reconstruye automáticamente el nivel 3
+                if (_param_insert(ctrl, &params[p]) == ESP_OK)
+                    total_loaded++;
             }
             free(buf);
         }
 
         ctrl->entities_ready = (total_loaded > 0);
 
-        ESP_LOGI(TAG, "nvs: ctrl=%d uuid=%s slave=%d ts=%.3f params=%d chunks=%d",
+        ESP_LOGI(TAG,
+                 "nvs: ctrl=%d uuid=%s slave=%d ts=%.3f "
+                 "params=%d reg_entries=%d chunks=%d",
                  hdr.control_id, hdr.uuid, hdr.slave_addr,
-                 hdr.update_ts, total_loaded, n_chunks);
+                 hdr.update_ts, total_loaded,
+                 ctrl->regs.count, n_chunks);
     }
 
     nvs_close(h);
@@ -761,7 +1100,8 @@ esp_err_t kx_param_store_load_nvs(void)
 esp_err_t kx_param_store_clear_nvs(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PARTITION, NVS_NS_STORE,
+                                            NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
     err = nvs_erase_all(h);
     nvs_commit(h);
