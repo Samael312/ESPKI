@@ -38,14 +38,16 @@ typedef struct {
 } _candidate_t;
 
 typedef struct {
-    _candidate_t *arr;
-    int           count;
-    int           capacity;
+    _candidate_t   *arr;
+    int             count;
+    int             capacity;
     // filtros
-    bool          demand_active;   // true → ignorar tick, leer todos
-    int64_t       tick_s;          // segundos actuales (solo en report)
-    int64_t       now_ms;
-    int           control_id;
+    bool            demand_active;
+    const int      *param_ids;     // set de param_ids permitidos (puede ser NULL)
+    int             n_param_ids;
+    int64_t         tick_s;
+    int64_t         now_ms;
+    int             control_id;
 } _collect_ctx_t;
 
 // =============================================================
@@ -56,6 +58,16 @@ static void *_palloc(size_t size)
     void *p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
     if (!p) p = malloc(size);
     return p;
+}
+
+// =============================================================
+// Búsqueda lineal en el set de param_ids
+// =============================================================
+static inline bool _in_set(const int *ids, int n, int param_id)
+{
+    for (int i = 0; i < n; i++)
+        if (ids[i] == param_id) return true;
+    return false;
 }
 
 // =============================================================
@@ -72,10 +84,14 @@ static void _collect_cb(int ctrl_id, const kx_param_t *param, void *ud)
     if (param->view == 0)  return;
 
     if (ctx->demand_active) {
-        // Modo demanda: leer todos los params visibles sin filtro de tiempo
+        // Modo demand-set: filtrar por el array de param_ids
+        if (ctx->param_ids != NULL) {
+            if (!_in_set(ctx->param_ids, ctx->n_param_ids, param->param_id))
+                return;
+        }
+        // Modo demand-full (param_ids==NULL): incluir todos
     } else {
-        // Modo report: respetar tick_s % sampling == 0
-        // igual que hacía _report_param_cb antes del packetizer
+        // Modo report: tick_s % sampling == 0
         if (param->sampling <= 0) return;
         if (ctx->tick_s % (int64_t)param->sampling != 0) return;
     }
@@ -102,7 +118,7 @@ static void _collect_cb(int ctrl_id, const kx_param_t *param, void *ud)
 }
 
 // =============================================================
-// Comparador qsort: (fc, reg)
+// Comparador qsort: (fc, reg, param_id)
 // =============================================================
 static int _cmp_candidate(const void *a, const void *b)
 {
@@ -203,10 +219,12 @@ static void _flush_group(kx_packet_list_t *list,
 // =============================================================
 // kx_pkt_build
 // =============================================================
-kx_packet_list_t *kx_pkt_build(int     control_id,
-                                bool    demand_active,
-                                int64_t tick_s,
-                                int64_t now_ms)
+kx_packet_list_t *kx_pkt_build(int            control_id,
+                                bool           demand_active,
+                                const int     *param_ids,
+                                int            n_param_ids,
+                                int64_t        tick_s,
+                                int64_t        now_ms)
 {
     // Metadatos del control (slave_addr)
     const kx_control_t *ctrl_info = kx_param_store_get_ctrl(control_id);
@@ -217,7 +235,7 @@ kx_packet_list_t *kx_pkt_build(int     control_id,
     uint8_t slave_addr = (uint8_t)ctrl_info->slave_addr;
 
     // Recopilar candidatos
-    int init_cap = 64;
+    int init_cap = (n_param_ids > 0) ? n_param_ids + 4 : 64;
     _candidate_t *arr = _palloc((size_t)init_cap * sizeof(_candidate_t));
     if (!arr) { ESP_LOGE(TAG, "build: OOM candidates"); return NULL; }
 
@@ -226,6 +244,8 @@ kx_packet_list_t *kx_pkt_build(int     control_id,
         .count         = 0,
         .capacity      = init_cap,
         .demand_active = demand_active,
+        .param_ids     = param_ids,
+        .n_param_ids   = n_param_ids,
         .tick_s        = tick_s,
         .now_ms        = now_ms,
         .control_id    = control_id,
@@ -233,14 +253,12 @@ kx_packet_list_t *kx_pkt_build(int     control_id,
     kx_param_store_foreach(_collect_cb, &ctx);
 
     if (ctx.count == 0) {
-        ESP_LOGD(TAG, "build: ctrl=%d — no candidates (demand=%d tick=%" PRId64 ")",
-                 control_id, (int)demand_active, tick_s);
+        ESP_LOGD(TAG, "build: ctrl=%d — no candidates "
+                 "(demand=%d set=%d tick=%" PRId64 ")",
+                 control_id, (int)demand_active, n_param_ids, tick_s);
         free(ctx.arr);
         return NULL;
     }
-
-    ESP_LOGD(TAG, "build: ctrl=%d — %d candidates (demand=%d tick=%" PRId64 ")",
-             control_id, ctx.count, (int)demand_active, tick_s);
 
     // Ordenar por (fc, reg)
     qsort(ctx.arr, (size_t)ctx.count, sizeof(_candidate_t), _cmp_candidate);
@@ -294,9 +312,20 @@ kx_packet_list_t *kx_pkt_build(int     control_id,
     free(group);
     free(ctx.arr);
 
-    ESP_LOGI(TAG, "ctrl=%d → %d params → %d packets (demand=%d tick=%" PRId64 " gap=%d)",
-             control_id, ctx.count, list->count,
-             (int)demand_active, tick_s, KX_PKT_MAX_GAP);
+    // Modo demand-set: log con "set=N"
+    if (param_ids != NULL) {
+        ESP_LOGI(TAG,
+                 "ctrl=%d → %d params (set=%d) → %d packets "
+                 "(demand=1 gap=%d)",
+                 control_id, ctx.count, n_param_ids,
+                 list->count, KX_PKT_MAX_GAP);
+    } else {
+        ESP_LOGI(TAG,
+                 "ctrl=%d → %d params → %d packets "
+                 "(demand=%d tick=%" PRId64 " gap=%d)",
+                 control_id, ctx.count, list->count,
+                 (int)demand_active, tick_s, KX_PKT_MAX_GAP);
+    }
 
     if (list->count == 0) { kx_pkt_free(list); return NULL; }
     return list;
@@ -342,8 +371,7 @@ void kx_pkt_dump(const kx_packet_list_t *list, const char *tag)
         if (pkt->num_regs == 1) {
             ESP_LOGI(tag, "  [%02d] INDIVIDUAL slave=%d fc=0x%02x "
                      "reg=0x%04x → param_id=%d",
-                     i, pkt->slave_addr, pkt->fc,
-                     pkt->start_reg,
+                     i, pkt->slave_addr, pkt->fc, pkt->start_reg,
                      (pkt->num_slots > 0) ? pkt->slots[0].param_id : -1);
         } else {
             ESP_LOGI(tag, "  [%02d] MULTI      slave=%d fc=0x%02x "
@@ -355,7 +383,8 @@ void kx_pkt_dump(const kx_packet_list_t *list, const char *tag)
             for (int s = 0; s < pkt->num_slots; s++) {
                 const kx_pkt_slot_t *sl = &pkt->slots[s];
                 if (sl->is_gap)
-                    ESP_LOGD(tag, "       slot[%d] reg=0x%04x GAP", s, sl->reg);
+                    ESP_LOGD(tag, "       slot[%d] reg=0x%04x GAP",
+                             s, sl->reg);
                 else
                     ESP_LOGD(tag, "       slot[%d] reg=0x%04x param_id=%d",
                              s, sl->reg, sl->param_id);

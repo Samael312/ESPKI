@@ -6,26 +6,24 @@
 // =============================================================
 // kx_modbus_packetizer.h  —  Agrupador de registros Modbus
 //
-// Analiza los parámetros de un control y genera una lista de
-// "packets" optimizados:
+// Tres modos de construcción (kx_pkt_build):
 //
-//   · Registros con el mismo fc_read y direcciones consecutivas
-//     se agrupan en UN solo packet multi-registro.
-//   · Registros aislados o con FC distinto se emiten como
-//     packets individuales (num_regs = 1).
+//   MODO DEMAND-FULL  (demand_active=true,  param_ids=NULL)
+//     Incluye todos los params visibles con fc_read válido.
+//     Usado en ciclo completo (param_id==0 en la cola).
+//
+//   MODO DEMAND-SET   (demand_active=true,  param_ids!=NULL)
+//     Incluye solo los param_ids del array dado.
+//     Usado en batch de demandas individuales: agrupa los
+//     registros consecutivos del set en un solo packet.
+//
+//   MODO REPORT       (demand_active=false, param_ids=NULL)
+//     Filtra por tick_s % param->sampling == 0.
+//     Usado en la tarea de reports periódicos.
 //
 // KX_PKT_MAX_GAP controla cuántos huecos se toleran al agrupar.
-// KX_PKT_MAX_REGS_PER_PKT es el límite físico del protocolo.
-//
-// MODO REPORT (use_tick_filter=true):
-//   El caller pasa tick_s y solo se incluyen params cuyo
-//   sampling > 0 y tick_s % sampling == 0.
-//   Esto garantiza que cada param se lee exactamente en su
-//   período, igual que hacía _report_param_cb original.
-//
-// MODO DEMAND (use_tick_filter=false):
-//   Se incluyen todos los params visibles con fc_read válido,
-//   ignorando el tick (demanda inmediata o ciclo completo).
+// KX_PKT_MAX_REGS_PER_PKT es el límite físico del protocolo
+// (125 holding/input regs por trama Modbus RTU).
 // =============================================================
 
 #define KX_PKT_MAX_REGS_PER_PKT   125
@@ -66,21 +64,24 @@ typedef struct {
 
 // Construye la lista de packets para el control indicado.
 //
-// control_id:      control a procesar.
-// demand_active:   true  → incluir todos los params visibles
-//                           (ciclo completo bajo demanda).
-//                  false → filtrar por tick_s % sampling == 0
-//                           (modo report periódico).
-// tick_s:          segundo actual del timer de reports.
-//                  Ignorado cuando demand_active=true.
-// now_ms:          timestamp en milisegundos (esp_timer).
+// control_id:    control a procesar.
+// demand_active: true  → modo demanda (todos los params o set).
+//                false → modo report (filtro tick_s % sampling).
+// param_ids:     array de param_id a incluir (solo en modo
+//                demand-set). NULL → incluir todos los elegibles.
+// n_param_ids:   longitud de param_ids. 0 si param_ids==NULL.
+// tick_s:        segundo actual del timer de reports.
+//                Ignorado cuando demand_active=true.
+// now_ms:        timestamp en milisegundos (esp_timer).
 //
 // Devuelve NULL si no hay params que leer o si falla la memoria.
 // El llamador debe liberar con kx_pkt_free().
-kx_packet_list_t *kx_pkt_build(int     control_id,
-                                bool    demand_active,
-                                int64_t tick_s,
-                                int64_t now_ms);
+kx_packet_list_t *kx_pkt_build(int            control_id,
+                                bool           demand_active,
+                                const int     *param_ids,
+                                int            n_param_ids,
+                                int64_t        tick_s,
+                                int64_t        now_ms);
 
 void kx_pkt_free(kx_packet_list_t *list);
 int  kx_pkt_real_param_count(const kx_packet_list_t *list);
