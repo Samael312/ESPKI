@@ -26,7 +26,7 @@
 // (125 holding/input regs por trama Modbus RTU).
 // =============================================================
 
-#define KX_PKT_MAX_REGS_PER_PKT   5
+#define KX_PKT_MAX_REGS_PER_PKT   3
 #define KX_PKT_MAX_PARAMS_PER_PKT 125
 
 #ifndef KX_PKT_MAX_GAP

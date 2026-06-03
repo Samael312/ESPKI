@@ -276,12 +276,6 @@ static void _process_single_control(cJSON *ctrl_json, int hint_control_id)
 // =============================================================
 static esp_err_t _handle_controls_list(cJSON *root)
 {
-    // ── Log del payload para diagnóstico ─────────────────────
-    char *dbg = cJSON_PrintUnformatted(root);
-    if (dbg) {
-        ESP_LOGI(TAG, "controls payload: %.300s", dbg);
-        free(dbg);
-    }
 
     // ── Caso 1: {"controls": [...]} ───────────────────────────
     cJSON *controls = cJSON_GetObjectItem(root, "controls");
