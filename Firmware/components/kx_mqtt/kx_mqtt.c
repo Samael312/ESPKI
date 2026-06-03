@@ -47,10 +47,10 @@ static char s_control_names[KX_MAX_CONTROLS][64];
 static int  s_control_count  = 0;
 
 // ── Defines de cola y backpressure ────────────────────────────
-#define QUEUE_BASE_SIZE              64
+#define QUEUE_BASE_SIZE              128
 #define QUEUE_PER_CONTROL            20
-#define KX_QUEUE_BACKPRESSURE_MAX    30
-#define KX_QUEUE_BACKPRESSURE_HEAP   (100 * 1024)
+#define KX_QUEUE_BACKPRESSURE_MAX    60
+#define KX_QUEUE_BACKPRESSURE_HEAP   (512 * 1024)
 #define KX_BACKPRESSURE_DELAY_MS     100
 
 static QueueHandle_t s_msg_queue = NULL;

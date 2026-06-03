@@ -413,6 +413,33 @@ static void _get_str(cJSON *obj, const char *key, char *buf, size_t len)
         buf[0] = '\0';
 }
 
+
+static kx_control_t *_ctrl_find_or_create_no_reset(int control_id)
+{
+    uint32_t idx = _ctrl_hash(control_id);
+    kx_ctrl_node_t *node = s_hash.buckets[idx];
+
+    while (node) {
+        if (node->ctrl.control_id == control_id)
+            return &node->ctrl;  // ← devuelve sin tocar nada
+        node = node->next;
+    }
+
+    // No existe → crear nuevo (igual que antes)
+    if (s_hash.count >= KX_PARAM_MAX_CONTROLS) {
+        ESP_LOGE(TAG, "hash full: %d controls", s_hash.count);
+        return NULL;
+    }
+    kx_ctrl_node_t *new_node = _psram_alloc(sizeof(kx_ctrl_node_t));
+    if (!new_node) return NULL;
+    memset(new_node, 0, sizeof(kx_ctrl_node_t));
+    new_node->ctrl.control_id = control_id;
+    new_node->next      = s_hash.buckets[idx];
+    s_hash.buckets[idx] = new_node;
+    s_hash.count++;
+    return &new_node->ctrl;
+}
+
 // =============================================================
 // Barra de progreso ASCII
 // =============================================================
@@ -761,7 +788,7 @@ void kx_param_store_set_slave_addr(int control_id, int slave_addr)
 {
     if (!s_initialized) kx_param_store_init();
     kx_control_t *ctrl = _ctrl_find(control_id);
-    if (!ctrl) ctrl = _ctrl_find_or_create(control_id);
+    if (!ctrl) ctrl = _ctrl_find_or_create_no_reset(control_id); 
     if (ctrl) {
         ctrl->slave_addr = slave_addr;
         ESP_LOGI(TAG, "slave_addr set: ctrl=%d → %d", control_id, slave_addr);
@@ -772,7 +799,7 @@ void kx_param_store_set_uuid(int control_id, const char *uuid)
 {
     if (!s_initialized) kx_param_store_init();
     kx_control_t *ctrl = _ctrl_find(control_id);
-    if (!ctrl) ctrl = _ctrl_find_or_create(control_id);
+    if (!ctrl) ctrl = _ctrl_find_or_create_no_reset(control_id); 
     if (ctrl && uuid)
         snprintf(ctrl->uuid, sizeof(ctrl->uuid), "%s", uuid);
 }
@@ -791,7 +818,7 @@ void kx_param_store_set_update_ts(int control_id, double ts)
 {
     if (!s_initialized) kx_param_store_init();
     kx_control_t *ctrl = _ctrl_find(control_id);
-    if (!ctrl) ctrl = _ctrl_find_or_create(control_id);
+    if (!ctrl) ctrl = _ctrl_find_or_create_no_reset(control_id);
     if (ctrl) {
         ctrl->update_ts = ts;
         ESP_LOGI(TAG, "update_ts set: ctrl=%d → %.3f", control_id, ts);

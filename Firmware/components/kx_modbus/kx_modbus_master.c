@@ -150,6 +150,7 @@ static volatile int64_t s_report_tick_s = -1;
 // =============================================================
 #define POLL_ALLOWED_BIT   BIT0
 #define DEMAND_BIT         BIT1
+#define BATCH_ACTIVE_BIT   BIT2 
 
 static EventGroupHandle_t  s_poll_eg       = NULL;
 static SemaphoreHandle_t   s_foreach_mutex = NULL;
@@ -404,13 +405,6 @@ static int _read_registers_multi(uint8_t slave_addr,
 
 // =============================================================
 // _dispatch_packet
-//
-// Envía un kx_packet_t al bus, decodifica la respuesta y
-// actualiza kx_param_store (niveles 2 y 3) y s_pub_queue.
-// Si el multi falla hace fallback a lecturas individuales.
-//
-// Requiere que el llamador ya haya tomado s_foreach_mutex.
-// Devuelve el número de params leídos con éxito.
 // =============================================================
 static int _dispatch_packet(const kx_packet_t *pkt,
                              kx_pub_kind_t pub_kind,
@@ -468,7 +462,7 @@ static int _dispatch_packet(const kx_packet_t *pkt,
                                        resp, sizeof(resp));
         int64_t ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
 
-        // Fallback individual si el multi falla (exc=0x03, timeout, etc.)
+        // Fallback individual si el multi falla
         if (rx < 0) {
             ESP_LOGW(TAG,
                      "multi FAILED (slave=%d fc=0x%02x reg=0x%04x num=%d) "
@@ -754,9 +748,6 @@ typedef struct { int target_param_id; int found_ctrl_id; } _find_ctrl_ctx_t;
 
 // =============================================================
 // _dispatch_control_packets
-//
-// Helper compartido: itera la lista de packets de un control
-// y los despacha soltando el mutex entre cada uno.
 // =============================================================
 static void _dispatch_control_packets(kx_packet_list_t *list,
                                       kx_pub_kind_t pub_kind,
@@ -770,7 +761,6 @@ static void _dispatch_control_packets(kx_packet_list_t *list,
         int pkt_errors = 0;
         int pkt_ok = _dispatch_packet(pkt, pub_kind, &pkt_errors);
         xSemaphoreGive(s_foreach_mutex);
-        // ↑ El writer puede colarse aquí
 
         if (out_ok)     *out_ok     += pkt_ok;
         if (out_errors) *out_errors += pkt_errors;
@@ -782,18 +772,16 @@ static void _dispatch_control_packets(kx_packet_list_t *list,
 
 // =============================================================
 // _poll_control_packetized
-// Ciclo completo de un control (demand_active=true, todos los
-// params). Usado en ciclo completo (param_id==0).
 // =============================================================
 static void _poll_control_packetized(int control_id, _poll_ctx_t *ctx)
 {
     int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
 
     kx_packet_list_t *list = kx_pkt_build(control_id,
-                                           true,   // demand_active
-                                           NULL,   // param_ids: todos
+                                           true,
+                                           NULL,
                                            0,
-                                           0,      // tick_s ignorado
+                                           0,
                                            now_ms);
     if (!list) {
         ESP_LOGD(TAG, "packetizer: ctrl=%d no packets (full)", control_id);
@@ -815,7 +803,7 @@ static void _poll_control_packetized(int control_id, _poll_ctx_t *ctx)
 }
 
 // =============================================================
-// _poll_ctrl_cb — callback foreach para ciclo completo
+// _poll_ctrl_cb
 // =============================================================
 typedef struct {
     _poll_ctx_t *ctx;
@@ -836,24 +824,9 @@ static void _poll_ctrl_cb(int ctrl_id, const kx_param_t *param, void *ud)
 
 // =============================================================
 // _poll_batch_packetized
-//
-// Batch de demandas individuales — USA EL PACKETIZER.
-//
-// Estrategia:
-//   1. Agrupar los param_ids del snapshot por control_id.
-//   2. Por cada control, llamar a kx_pkt_build en modo
-//      demand-set (param_ids != NULL) para que el packetizer
-//      agrupe los que tengan registros consecutivos en un
-//      solo packet multi-registro.
-//   3. Despachar con _dispatch_control_packets().
-//   4. Llenar el array de resultados para el resumen.
-//
-// Devuelve: ok, errors, dropped acumulados.
 // =============================================================
-
-// Estructura para agrupar param_ids por control
 #define MAX_CTRLS_IN_BATCH  KX_PARAM_MAX_CONTROLS
-#define MAX_PARAMS_IN_BATCH 1500   // igual que DEMAND_QUEUE_SIZE
+#define MAX_PARAMS_IN_BATCH 1500
 
 typedef struct {
     int ctrl_id;
@@ -861,7 +834,6 @@ typedef struct {
     int n_params;
 } _ctrl_group_t;
 
-// Callback foreach para encontrar el control_id de un param_id
 static void _find_ctrl_cb(int ctrl_id, const kx_param_t *param, void *ud)
 {
     _find_ctrl_ctx_t *ctx = (_find_ctrl_ctx_t *)ud;
@@ -881,13 +853,13 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
                                    _batch_result_t *results,
                                    int *out_ok,
                                    int *out_errors,
-                                   int *out_dropped)
+                                   int *out_dropped,
+                                   int *out_packaged)   // ← NUEVO
 {
     // ── 1. Agrupar param_ids por control_id ───────────────────
     _ctrl_group_t *groups = malloc(MAX_CTRLS_IN_BATCH * sizeof(_ctrl_group_t));
     if (!groups) {
         ESP_LOGE(TAG, "batch_packetized: OOM groups");
-        // Marcar todos como error
         for (int i = 0; i < valid_count; i++) {
             snprintf(results[i].err_msg, sizeof(results[i].err_msg), "OOM");
             (*out_errors)++;
@@ -899,7 +871,6 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
     for (int i = 0; i < valid_count; i++) {
         int param_id = snapshot[i].param_id;
 
-        // Buscar control_id
         _find_ctrl_ctx_t fctx = {
             .target_param_id = param_id,
             .found_ctrl_id   = -1,
@@ -914,7 +885,6 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
             continue;
         }
 
-        // Añadir al grupo de su control
         int g = -1;
         for (int j = 0; j < n_groups; j++) {
             if (groups[j].ctrl_id == fctx.found_ctrl_id) { g = j; break; }
@@ -944,7 +914,6 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
 
         if (!kx_mqtt_is_connected() || !kx_param_store_is_ready()) {
             for (int j = 0; j < grp->n_params; j++) {
-                // Marcar error en results
                 for (int i = 0; i < valid_count; i++) {
                     if (snapshot[i].param_id == grp->param_ids[j]) {
                         snprintf(results[i].err_msg,
@@ -964,15 +933,13 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
 
         int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
 
-        // Modo demand-set: solo los param_ids de este batch/control
         kx_packet_list_t *list = kx_pkt_build(grp->ctrl_id,
-                                               true,           // demand_active
-                                               grp->param_ids, // set filtrado
+                                               true,
+                                               grp->param_ids,
                                                grp->n_params,
-                                               0,              // tick_s ignorado
+                                               0,
                                                now_ms);
         if (!list) {
-            // No hay params legibles en el set → marcar error
             for (int j = 0; j < grp->n_params; j++) {
                 for (int i = 0; i < valid_count; i++) {
                     if (snapshot[i].param_id == grp->param_ids[j]) {
@@ -992,6 +959,9 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
         kx_pkt_dump(list, TAG);
 #endif
 
+        // ── Contabilizar cuántos param_ids entraron en packets ──
+        if (out_packaged) *out_packaged += kx_pkt_real_param_count(list);
+
         // Despachar todos los packets del control
         int ctrl_ok     = 0;
         int ctrl_errors = 0;
@@ -1001,64 +971,72 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
         *out_ok     += ctrl_ok;
         *out_errors += ctrl_errors;
 
-        // Marcar resultados individuales en el array
-        // Los params que salieron OK en los packets → ok=true
+        // Marcar resultados individuales
+        int64_t ts_dispatch_end = (int64_t)(esp_timer_get_time() / 1000ULL);
+
         for (int i = 0; i < valid_count; i++) {
             int pid = snapshot[i].param_id;
-            // Buscar si este param_id estaba en este grupo
+
+            // Solo los del grupo actual
             bool in_group = false;
             for (int j = 0; j < grp->n_params; j++) {
                 if (grp->param_ids[j] == pid) { in_group = true; break; }
             }
             if (!in_group) continue;
+            if (results[i].ok) continue;  // ya marcado OK por otro grupo
 
-            // Buscar si el param aparece en algún slot OK del list
-            bool found_ok = false;
-            for (int p = 0; p < list->count && !found_ok; p++) {
-                const kx_packet_t *pkt = &list->pkts[p];
-                for (int s = 0; s < pkt->num_slots && !found_ok; s++) {
-                    if (!pkt->slots[s].is_gap &&
-                        pkt->slots[s].param_id == pid) {
-                        // El param estaba en un slot; si el packet
-                        // se despachó (no hay forma de saber por param
-                        // individualmente aquí), asumimos ok si ctrl_ok > 0
-                        // y no hubo error total.
-                        found_ok = true;
-                    }
-                }
-            }
+            // Verificar que el param fue leído: ts_last_read reciente
+            _find_ctrl_ctx_t fctx2 = {
+                .target_param_id = pid,
+                .found_ctrl_id   = -1,
+            };
+            kx_param_store_foreach(_find_ctrl_cb, &fctx2);
 
-            if (found_ok && ctrl_errors == 0) {
-                results[i].ok = true;
-            } else if (!results[i].ok) {
-                // Solo marcar error si no fue marcado ya
-                if (results[i].err_msg[0] == '\0') {
-                    snprintf(results[i].err_msg,
-                             sizeof(results[i].err_msg),
-                             "modbus_error");
+            if (fctx2.found_ctrl_id >= 0) {
+                const kx_param_t *p =
+                    kx_param_store_get_param(fctx2.found_ctrl_id, pid);
+                // ts_last_read dentro de los últimos 5 segundos = leído OK
+                if (p && p->ts_last_read > 0 &&
+                    (ts_dispatch_end - p->ts_last_read) < 5000) {
+                    results[i].ok = true;
+                } else if (results[i].err_msg[0] == '\0') {
+                    snprintf(results[i].err_msg, sizeof(results[i].err_msg),
+                             "mb_no_response");
                 }
+            } else {
+                if (results[i].err_msg[0] == '\0')
+                    snprintf(results[i].err_msg, sizeof(results[i].err_msg),
+                             "not_in_store");
             }
         }
 
         kx_pkt_free(list);
     }
 
+        *out_ok     = 0;
+        *out_errors = 0;
+        for (int i = 0; i < valid_count; i++) {
+            if (results[i].ok)
+                (*out_ok)++;
+            else if (results[i].err_msg[0] != '\0')
+                (*out_errors)++;
+        }
+
     free(groups);
 }
 
 // =============================================================
 // _report_control_packetized
-// Ciclo de report para un control (tick_s % sampling).
 // =============================================================
 static void _report_control_packetized(int control_id, _report_ctx_t *rctx)
 {
     int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
 
     kx_packet_list_t *list = kx_pkt_build(control_id,
-                                           false,        // demand_active=false
-                                           NULL,         // param_ids: filtro tick
+                                           false,
+                                           NULL,
                                            0,
-                                           rctx->tick_s, // FIX: tick real
+                                           rctx->tick_s,
                                            now_ms);
     if (!list) return;
 
@@ -1208,6 +1186,7 @@ static void _modbus_task(void *arg)
              kx_param_store_count());
 
     while (s_running) {
+        xEventGroupSetBits(s_poll_eg, BATCH_ACTIVE_BIT);
 
         EventBits_t bits = xEventGroupWaitBits(
             s_poll_eg, DEMAND_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
@@ -1298,7 +1277,7 @@ static void _modbus_task(void *arg)
             continue;
         }
 
-        // ── Batch de demandas individuales — con packetizer ───
+        // ── Batch de demandas individuales ────────────────────
         ESP_LOGI(TAG, "batch poll: %d demands (dupes=%d expired=%d) "
                  "— packetizing...",
                  valid_count, dupes, expired);
@@ -1313,27 +1292,34 @@ static void _modbus_task(void *arg)
         for (int i = 0; i < valid_count; i++)
             results[i].param_id = snapshot[i].param_id;
 
-        int batch_ok      = 0;
-        int batch_errors  = 0;
-        int batch_dropped = 0;
+        int batch_ok       = 0;
+        int batch_errors   = 0;
+        int batch_dropped  = 0;
+        int batch_packaged = 0;   // ← NUEVO: cuántos entraron en packets
 
         _poll_batch_packetized(snapshot, valid_count, results,
-                               &batch_ok, &batch_errors, &batch_dropped);
+                               &batch_ok, &batch_errors, &batch_dropped,
+                               &batch_packaged);
 
-        // Resumen
+        // ── Resumen ───────────────────────────────────────────
         int pub_hwm    = (int)uxQueueMessagesWaiting(s_pub_queue);
         int demand_hwm = (int)uxQueueMessagesWaiting(s_demand_queue);
         int write_hwm  = (int)uxQueueMessagesWaiting(s_write_queue);
 
+        // Params que el packetizer rechazó (sin fc_read válido o view==0)
+        int batch_no_fc = valid_count - batch_packaged - batch_errors;
+        if (batch_no_fc < 0) batch_no_fc = 0;
+
         printf("┌──────────────────────────────────────────────────────────────┐\n");
         printf("│                    BATCH POLL  RESUMEN                        │\n");
         printf("├──────────────────────────────────────────────────────────────┤\n");
-        printf("│  Recopilados : %-5d  (dupes descartados: %-5d)             │\n",
-               valid_count, dupes);
-        printf("│  Expirados   : %-5d                                          │\n", expired);
-        printf("│  OK (leídos) : %-5d                                          │\n", batch_ok);
-        printf("│  Errores     : %-5d                                          │\n", batch_errors);
-        printf("│  Drops MQTT  : %-5d                                          │\n", batch_dropped);
+        printf("│  Demandados  : %-5d  dupes=%-5d  expirados=%-5d           │\n",
+               valid_count, dupes, expired);
+        printf("│  Empaquetados: %-5d  sin_fc/view=%-5d                       │\n",
+               batch_packaged, batch_no_fc);
+        printf("│  Publicados  : %-5d  errores_mb=%-5d  drops=%-5d          │\n",
+               batch_ok, batch_errors, batch_dropped);
+        printf("├──────────────────────────────────────────────────────────────┤\n");
         printf("│  Heap libre  : %-8lu bytes                                │\n",
                (unsigned long)kx_system_heap_free());
         printf("│  pub_queue   : hwm=%-3d / %-5d slots                        │\n",
@@ -1342,6 +1328,7 @@ static void _modbus_task(void *arg)
                demand_hwm, DEMAND_QUEUE_SIZE);
         printf("│  write_queue : hwm=%-3d / %-5d slots                        │\n",
                write_hwm, WRITE_QUEUE_SIZE);
+
 
         if (batch_ok > 0) {
             printf("├──────────────────────────────────────────────────────────────┤\n");
@@ -1373,10 +1360,44 @@ static void _modbus_task(void *arg)
         printf("└──────────────────────────────────────────────────────────────┘\n");
         fflush(stdout);
 
+         // ── Log de params sin fc_read/view fuera del box ──────
+        if (batch_no_fc > 0) {
+            ESP_LOGW("kx_nofc", "── params sin fc_read valido o view=0 (%d) ──", batch_no_fc);
+            for (int i = 0; i < valid_count; i++) {
+                if (results[i].ok) continue;
+
+                _find_ctrl_ctx_t fctx = {
+                    .target_param_id = snapshot[i].param_id,
+                    .found_ctrl_id   = -1,
+                };
+                kx_param_store_foreach(_find_ctrl_cb, &fctx);
+
+                const kx_param_t *p = NULL;
+                if (fctx.found_ctrl_id >= 0)
+                    p = kx_param_store_get_param(fctx.found_ctrl_id, snapshot[i].param_id);
+
+                if (p) {
+                    const char *reason = (p->view == 0)         ? "view=0"
+                                       : (p->function_read == 0) ? "fc_r=0 (write-only)"
+                                                                  : results[i].err_msg;
+                    ESP_LOGW("kx_nofc",
+                             "  id=%-10d reg=0x%04x fc_r=%d fc_w=%d view=%d  %-20s  %s",
+                             p->param_id, p->reg,
+                             p->function_read, p->function_write, p->view,
+                             p->name, reason);
+                } else {
+                    ESP_LOGW("kx_nofc",
+                             "  id=%-10d (no encontrado en store)  err=%s",
+                             snapshot[i].param_id, results[i].err_msg);
+                }
+            }
+        }
+
         ESP_LOGI(TAG,
-            "batch done — valid=%d ok=%d errors=%d drops=%d "
-            "dupes=%d expired=%d heap=%" PRIu32,
-            valid_count, batch_ok, batch_errors, batch_dropped,
+            "batch done — demanded=%d packaged=%d no_fc=%d "
+            "published=%d errors=%d drops=%d dupes=%d expired=%d heap=%" PRIu32,
+            valid_count, batch_packaged, batch_no_fc,
+            batch_ok, batch_errors, batch_dropped,
             dupes, expired, kx_system_heap_free());
 
         free(results);
