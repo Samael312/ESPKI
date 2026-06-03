@@ -18,6 +18,7 @@
 #include <string.h>
 #include <float.h>
 
+
 static const char *TAG = "main";
 
 #define WIFI_CONNECTED_BIT BIT0
@@ -33,10 +34,37 @@ static int s_wifi_retry = 0;
 
 // ── NTP ───────────────────────────────────────────────────────
 static void _ntp_init(void)
-{
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+{   
+
+    // IPs directas — no necesitan DNS
+    // 216.239.35.0  = time.google.com
+    // Un solo servidor por IP directa — sin DNS
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("216.239.35.0");
     esp_netif_sntp_init(&config);
-    ESP_LOGI(TAG, "NTP sync started");
+
+    ESP_LOGI(TAG, "Waiting for NTP sync...");
+    int retry = 0;
+    const int max_retry = 20;
+
+    while (retry < max_retry) {
+        if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(2000)) == ESP_OK) {
+            break;
+        }
+        retry++;
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        ESP_LOGI(TAG, "NTP sync pending... (%d/%d) epoch=%ld",
+                 retry, max_retry, tv.tv_sec);
+    }
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+
+    if (tv.tv_sec < 1700000000) {
+        ESP_LOGE(TAG, "NTP FAILED — epoch=%ld — timestamps will be wrong", tv.tv_sec);
+    } else {
+        ESP_LOGI(TAG, "NTP sync OK — epoch=%ld", tv.tv_sec);
+    }
 }
 
 // ── WiFi event handler ────────────────────────────────────────

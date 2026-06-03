@@ -41,9 +41,10 @@ typedef struct {
     _candidate_t   *arr;
     int             count;
     int             capacity;
+    bool            full;        // true cuando realloc falló — no escribir más
     // filtros
     bool            demand_active;
-    const int      *param_ids;     // set de param_ids permitidos (puede ser NULL)
+    const int      *param_ids;
     int             n_param_ids;
     int64_t         tick_s;
     int64_t         now_ms;
@@ -72,10 +73,16 @@ static inline bool _in_set(const int *ids, int n, int param_id)
 
 // =============================================================
 // Callback de recopilación
+// FIX: cuando realloc falla, se marca ctx->full=true y se deja
+//      de escribir. Sin el fix, se escribía más allá del buffer
+//      original corrompiendo el heap (StoreProhibited panic).
 // =============================================================
 static void _collect_cb(int ctrl_id, const kx_param_t *param, void *ud)
 {
     _collect_ctx_t *ctx = (_collect_ctx_t *)ud;
+
+    // Si ya marcamos el array como lleno definitivamente, no escribir más
+    if (ctx->full) return;
 
     if (ctrl_id != ctx->control_id) return;
 
@@ -84,14 +91,11 @@ static void _collect_cb(int ctrl_id, const kx_param_t *param, void *ud)
     if (param->view == 0)  return;
 
     if (ctx->demand_active) {
-        // Modo demand-set: filtrar por el array de param_ids
         if (ctx->param_ids != NULL) {
             if (!_in_set(ctx->param_ids, ctx->n_param_ids, param->param_id))
                 return;
         }
-        // Modo demand-full (param_ids==NULL): incluir todos
     } else {
-        // Modo report: tick_s % sampling == 0
         if (param->sampling <= 0) return;
         if (ctx->tick_s % (int64_t)param->sampling != 0) return;
     }
@@ -102,11 +106,20 @@ static void _collect_cb(int ctrl_id, const kx_param_t *param, void *ud)
         _candidate_t *tmp = realloc(ctx->arr,
                                     (size_t)new_cap * sizeof(_candidate_t));
         if (!tmp) {
-            ESP_LOGW(TAG, "collect_cb: realloc failed at %d", ctx->count);
+            // FIX: marcar como lleno — nunca escribir fuera del buffer original
+            ESP_LOGW(TAG, "collect_cb: realloc failed at count=%d — capping",
+                     ctx->count);
+            ctx->full = true;
             return;
         }
         ctx->arr      = tmp;
         ctx->capacity = new_cap;
+    }
+
+    // Guardia adicional de seguridad
+    if (ctx->count >= ctx->capacity) {
+        ctx->full = true;
+        return;
     }
 
     ctx->arr[ctx->count++] = (_candidate_t){
@@ -146,10 +159,6 @@ static bool _list_ensure(kx_packet_list_t *list)
 
 // =============================================================
 // _flush_group
-//
-// Cierra el grupo actual y escribe uno o más kx_packet_t.
-// Si el span supera KX_PKT_MAX_REGS_PER_PKT se parte en
-// sub-packets del tamaño máximo.
 // =============================================================
 static void _flush_group(kx_packet_list_t *list,
                          uint8_t slave_addr,
@@ -234,7 +243,7 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
     }
     uint8_t slave_addr = (uint8_t)ctrl_info->slave_addr;
 
-    // Recopilar candidatos
+    // Capacidad inicial del array de candidatos
     int init_cap = (n_param_ids > 0) ? n_param_ids + 4 : 64;
     _candidate_t *arr = _palloc((size_t)init_cap * sizeof(_candidate_t));
     if (!arr) { ESP_LOGE(TAG, "build: OOM candidates"); return NULL; }
@@ -243,6 +252,7 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
         .arr           = arr,
         .count         = 0,
         .capacity      = init_cap,
+        .full          = false,      // FIX: inicializar bandera
         .demand_active = demand_active,
         .param_ids     = param_ids,
         .n_param_ids   = n_param_ids,
@@ -251,6 +261,11 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
         .control_id    = control_id,
     };
     kx_param_store_foreach(_collect_cb, &ctx);
+
+    if (ctx.full) {
+        ESP_LOGW(TAG, "build: ctrl=%d candidate array was capped at %d "
+                 "(realloc OOM)", control_id, ctx.count);
+    }
 
     if (ctx.count == 0) {
         ESP_LOGD(TAG, "build: ctrl=%d — no candidates "
@@ -304,7 +319,15 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
             n_group = 0;
         }
 
-        group[n_group++] = *cur;
+        // Guardia: no desbordar el buffer temporal del grupo
+        if (n_group < KX_PKT_MAX_REGS_PER_PKT) {
+            group[n_group++] = *cur;
+        } else {
+            // Caso extremo: forzar flush y empezar nuevo grupo
+            _flush_group(list, slave_addr, group[0].fc, group, n_group);
+            n_group = 0;
+            group[n_group++] = *cur;
+        }
     }
     if (n_group > 0)
         _flush_group(list, slave_addr, group[0].fc, group, n_group);
@@ -312,7 +335,6 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
     free(group);
     free(ctx.arr);
 
-    // Modo demand-set: log con "set=N"
     if (param_ids != NULL) {
         ESP_LOGI(TAG,
                  "ctrl=%d → %d params (set=%d) → %d packets "

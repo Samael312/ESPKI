@@ -26,7 +26,7 @@
 // (125 holding/input regs por trama Modbus RTU).
 // =============================================================
 
-#define KX_PKT_MAX_REGS_PER_PKT   125
+#define KX_PKT_MAX_REGS_PER_PKT   5
 #define KX_PKT_MAX_PARAMS_PER_PKT 125
 
 #ifndef KX_PKT_MAX_GAP
@@ -61,21 +61,6 @@ typedef struct {
 // =============================================================
 // API pública
 // =============================================================
-
-// Construye la lista de packets para el control indicado.
-//
-// control_id:    control a procesar.
-// demand_active: true  → modo demanda (todos los params o set).
-//                false → modo report (filtro tick_s % sampling).
-// param_ids:     array de param_id a incluir (solo en modo
-//                demand-set). NULL → incluir todos los elegibles.
-// n_param_ids:   longitud de param_ids. 0 si param_ids==NULL.
-// tick_s:        segundo actual del timer de reports.
-//                Ignorado cuando demand_active=true.
-// now_ms:        timestamp en milisegundos (esp_timer).
-//
-// Devuelve NULL si no hay params que leer o si falla la memoria.
-// El llamador debe liberar con kx_pkt_free().
 kx_packet_list_t *kx_pkt_build(int            control_id,
                                 bool           demand_active,
                                 const int     *param_ids,
