@@ -49,17 +49,14 @@ static int  s_control_count  = 0;
 // ── Defines de cola y backpressure ────────────────────────────
 #define QUEUE_BASE_SIZE              128
 #define QUEUE_PER_CONTROL            20
-#define KX_QUEUE_BACKPRESSURE_MAX    60
-#define KX_QUEUE_BACKPRESSURE_HEAP   (512 * 1024)
-#define KX_BACKPRESSURE_DELAY_MS     100
+#define KX_QUEUE_BACKPRESSURE_MAX    40        // bajado de 60
+#define KX_QUEUE_BACKPRESSURE_HEAP   (256 * 1024)  // bajado de 512KB
 
 static QueueHandle_t s_msg_queue = NULL;
 
 // ── Forward declarations ──────────────────────────────────────
 static void _track_control_from_topic(const char *topic);
 static void _log_controls_list(void);
-
-
 
 static double _ts(void)
 {
@@ -166,7 +163,7 @@ static void _log_controls_list(void)
     ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 }
 
-// ── Tarea de procesamiento ────────────────────────────────────
+// ── Tarea de procesamiento — prioridad 6 ─────────────────────
 static void _processing_task(void *arg)
 {
     kx_msg_t msg;
@@ -259,35 +256,6 @@ static void _subscribe_all(void)
     vTaskDelay(pdMS_TO_TICKS(200));
 }
 
-// ── Backpressure ──────────────────────────────────────────────
-static void _wait_backpressure(void)
-{
-    int      queue_used = (int)uxQueueMessagesWaiting(s_msg_queue);
-    uint32_t heap_free  = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
-    bool     triggered  = false;
-
-    while (queue_used > KX_QUEUE_BACKPRESSURE_MAX ||
-           heap_free  < KX_QUEUE_BACKPRESSURE_HEAP) {
-
-        if (!triggered) {
-            ESP_LOGW(TAG, "backpressure: queue=%d heap=%lu — "
-                     "waiting for kx_processing to catch up",
-                     queue_used, (unsigned long)heap_free);
-            triggered = true;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(KX_BACKPRESSURE_DELAY_MS));
-
-        queue_used = (int)uxQueueMessagesWaiting(s_msg_queue);
-        heap_free  = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
-    }
-
-    if (triggered) {
-        ESP_LOGI(TAG, "backpressure released: queue=%d heap=%lu",
-                 queue_used, (unsigned long)heap_free);
-    }
-}
-
 // ── Event handler ─────────────────────────────────────────────
 static void _mqtt_event_handler(void *arg, esp_event_base_t base,
                                 int32_t event_id, void *event_data)
@@ -317,12 +285,36 @@ static void _mqtt_event_handler(void *arg, esp_event_base_t base,
     case MQTT_EVENT_DATA:
 
         if (ev->topic_len > 0) {
-            
-            _wait_backpressure();
+            // ── Backpressure rápido: drop inmediato sin esperar ──
+            int   queue_used = (int)uxQueueMessagesWaiting(s_msg_queue);
+            uint32_t heap_free = heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+
+            if (queue_used > KX_QUEUE_BACKPRESSURE_MAX ||
+                heap_free  < KX_QUEUE_BACKPRESSURE_HEAP) {
+
+                // Extraer topic para el log (puede no estar null-terminated)
+                char drop_topic[64] = {0};
+                size_t tl = ev->topic_len < sizeof(drop_topic) - 1
+                            ? ev->topic_len : sizeof(drop_topic) - 1;
+                memcpy(drop_topic, ev->topic, tl);
+
+                ESP_LOGW(TAG,
+                         "backpressure DROP: queue=%d heap=%lu topic=%s",
+                         queue_used, (unsigned long)heap_free, drop_topic);
+
+                // Descartar buffer en curso si lo hubiera
+                if (s_rx_buf) {
+                    free(s_rx_buf);
+                    s_rx_buf = NULL;
+                }
+                s_rx_total   = 0;
+                s_rx_written = 0;
+                break;
+            }
 
             size_t tlen = ev->topic_len < sizeof(s_rx_topic) - 1
                         ? ev->topic_len : sizeof(s_rx_topic) - 1;
-                        
+
             memcpy(s_rx_topic, ev->topic, tlen);
             s_rx_topic[tlen] = '\0';
 
@@ -343,8 +335,8 @@ static void _mqtt_event_handler(void *arg, esp_event_base_t base,
 
             s_rx_buf = malloc(s_rx_total + 1);
             if (!s_rx_buf) {
-                uint32_t safe = available > (512 * 1024)
-                                ? available - (512 * 1024) : 0;
+                uint32_t safe = available > (256 * 1024)
+                                ? available - (256 * 1024) : 0;
                 ESP_LOGW(TAG, "OOM: need %d — fallback a %lu bytes",
                          s_rx_total, (unsigned long)safe);
                 if (safe > 0) {
@@ -434,12 +426,13 @@ esp_err_t kx_mqtt_start(kx_mqtt_msg_cb_t on_message)
         return ESP_FAIL;
     }
 
+    // Prioridad subida de 4 a 6
     BaseType_t ret = xTaskCreate(
         _processing_task,
         "kx_processing",
         16384,
         NULL,
-        4,
+        6,
         NULL
     );
 
@@ -456,7 +449,6 @@ esp_err_t kx_mqtt_start(kx_mqtt_msg_cb_t on_message)
              "\"device_connection_state\": \"offline\","
              "\"ts\": 0}");
 
-    // Client ID
     char client_id[64];
     snprintf(client_id, sizeof(client_id), "%s", KX_DEVICE_UUID);
 
@@ -465,21 +457,13 @@ esp_err_t kx_mqtt_start(kx_mqtt_msg_cb_t on_message)
         .credentials.client_id                = client_id,
         .credentials.username                 = KX_MQTT_USERNAME,
         .credentials.authentication.password  = KX_MQTT_PASSWORD,
-
-        // ── TLS ──────────────────────────────────────────────
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
-
-        // ── Sesión ───────────────────────────────────────────
         .session.keepalive         = KX_MQTT_KEEPALIVE_S,
         .session.last_will.topic   = s_lwt_topic,
         .session.last_will.msg     = s_lwt_payload,
         .session.last_will.qos     = 1,
         .session.last_will.retain  = 1,
-
-        // ── Red ──────────────────────────────────────────────
         .network.reconnect_timeout_ms = KX_MQTT_RECONNECT_MIN_MS,
-
-        // ── Buffer de recepción ───────────────────────────────
         .buffer.size = KX_PAYLOAD_MAX_BYTES,
     };
 

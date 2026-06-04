@@ -15,15 +15,9 @@ bool      kx_modbus_master_is_running(void);
 void      kx_modbus_pause(void);
 void      kx_modbus_resume(void);
 
-// Lectura puntual bajo demanda.
-esp_err_t kx_modbus_read_one(int control_id, int param_id);
-
-// Escritura: ahora encola el comando en s_write_queue y retorna
+// Escritura: encola el comando en s_write_queue y retorna
 // inmediatamente. La writer task lo ejecuta en segundo plano
 // tomando el mutex entre lecturas del batch poll.
-esp_err_t kx_modbus_write_one(int control_id, int param_id, float value);
-
-// Versión extendida con timestamp (usada internamente por kx_telemetry)
 esp_err_t kx_modbus_enqueue_write(int control_id, int param_id,
                                    float value, double ts);
 

@@ -62,9 +62,6 @@
 #define KX_TOPIC_CONFIG_ERROR KX_TOPIC_PREFIX "/" KX_DEVICE_UUID "/config/error"
 
 // Discovery activo (dispositivo → bridge)
-// Topic: {uuid}/controls  con payload {"_type":"controls-discovery","timestamp":...}
-// El bridge escucha este topic y responde publicando controls.json
-// en +/{uuid}/controls (recibido por el dispositivo vía suscripción)
 #define KX_TOPIC_CONTROLS_DISCOVERY     KX_DEVICE_UUID "/controls"
 
 // ── Modbus ────────────────────────────────────────────────────
@@ -76,10 +73,7 @@
 // ── Firmware version ──────────────────────────────────────────
 #define KX_FW_VERSION  "0.2.0"
 
-// En kx_config.h — añade macros de log estructurado
-#define KX_LOG_PHASE(tag, phase, fmt, ...) \
-    ESP_LOGI(tag, "[%-12s] " fmt, phase, ##__VA_ARGS__)
-
+// ── Log de ciclo estructurado ─────────────────────────────────
 #define KX_LOG_CYCLE_START(tag, cycle, controls, readable) \
     ESP_LOGI(tag, \
         "\n┌─[CYCLE %-3" PRId64 "]──────────────────────────────┐\n" \

@@ -43,52 +43,30 @@
 
 // =============================================================
 // NIVEL 3 — Registro Modbus
-//
-// Clave compuesta: (reg, fc_read, fc_write).
-// La clave se empaqueta en un uint32_t para la función de hash:
-//   bits[31:16] = reg
-//   bits[15: 8] = fc_read
-//   bits[ 7: 0] = fc_write
-//
-// Dos parámetros con idéntica dirección de registro (reg) pero
-// distintas funciones de acceso generan entradas separadas, lo
-// que evita aliasing en la caché del bus Modbus.
 // =============================================================
 
-// ── Clave del nivel 3 ─────────────────────────────────────────
 typedef struct {
-    uint16_t reg;        // dirección del registro Modbus
-    uint8_t  fc_read;    // función de lectura  (0 si no tiene)
-    uint8_t  fc_write;   // función de escritura (0 si no tiene)
+    uint16_t reg;
+    uint8_t  fc_read;
+    uint8_t  fc_write;
 } kx_reg_key_t;
 
-// ── Entrada del nivel 3 ───────────────────────────────────────
 typedef struct {
     kx_reg_key_t key;
-
-    // ── Valor de lectura ──────────────────────────────────────
-    float   value;           // último valor leído del bus (post offset/addition)
-                             // FLT_MAX = nunca leído
-    int64_t ts_last_read;    // tick (ms) de la última lectura
-                             // 0 = nunca leído
-
-    // ── Valor de escritura ────────────────────────────────────
-    float   last_write_value; // último valor escrito en el bus
-                              // FLT_MAX = nunca escrito
-    int64_t ts_last_write;    // tick (ms) de la última escritura
-                              // 0 = nunca escrito
+    float   value;
+    int64_t ts_last_read;
+    float   last_write_value;
+    int64_t ts_last_write;
 } kx_reg_entry_t;
 
-// ── Nodo de chaining (nivel 3) ────────────────────────────────
 typedef struct kx_reg_node {
     kx_reg_entry_t       entry;
     struct kx_reg_node  *next;
 } kx_reg_node_t;
 
-// ── Tabla hash nivel 3 ────────────────────────────────────────
 typedef struct {
     kx_reg_node_t *buckets[KX_REG_HASH_BUCKETS];
-    int            count;    // total de entradas únicas (clave compuesta)
+    int            count;
 } kx_reg_hash_t;
 
 // =============================================================
@@ -108,21 +86,19 @@ typedef struct {
     float   addition;
     int     mask;
     int     view;
-    int     sampling;           // intervalo de publicación en segundos (report)
+    int     sampling;
     double  ts_set;
 
     // ── Campos de runtime (no se persisten en NVS) ────────────
-    int64_t ts_last_read;         // tick (ms) de la última lectura Modbus
-    float   last_published_value; // último valor enviado en status
+    int64_t ts_last_read;
+    float   last_published_value;
 } kx_param_t;
 
-// ── Nodo de chaining (nivel 2) ────────────────────────────────
 typedef struct kx_param_node {
     kx_param_t           param;
     struct kx_param_node *next;
 } kx_param_node_t;
 
-// ── Tabla hash nivel 2 ────────────────────────────────────────
 typedef struct {
     kx_param_node_t *buckets[KX_PARAM_HASH_BUCKETS];
     int              count;
@@ -130,27 +106,22 @@ typedef struct {
 
 // =============================================================
 // NIVEL 1 — Control
-//
-// Contiene su propia hash de params (nivel 2) y su propia hash
-// de registros Modbus (nivel 3), más metadatos del control.
 // =============================================================
 typedef struct {
     int              control_id;
     int              slave_addr;
     char             uuid[64];
     double           update_ts;
-    kx_param_hash_t  params;     // nivel 2
-    kx_reg_hash_t    regs;       // nivel 3 — caché de registros Modbus
+    kx_param_hash_t  params;
+    kx_reg_hash_t    regs;
     bool             entities_ready;
 } kx_control_t;
 
-// ── Nodo de chaining (nivel 1) ────────────────────────────────
 typedef struct kx_ctrl_node {
     kx_control_t         ctrl;
     struct kx_ctrl_node *next;
 } kx_ctrl_node_t;
 
-// ── Tabla hash nivel 1 ────────────────────────────────────────
 typedef struct {
     kx_ctrl_node_t *buckets[KX_CTRL_HASH_BUCKETS];
     int             count;
@@ -162,10 +133,6 @@ typedef struct {
 typedef void (*kx_param_progress_cb_t)(int control_id, int received, int total);
 typedef void (*kx_param_iter_cb_t)(int control_id, const kx_param_t *param, void *user_data);
 
-// Callback de iteración sobre el nivel 3.
-// control_id: el control al que pertenece la entrada.
-// entry:      puntero de solo lectura a la entrada del registro.
-// user_data:  contexto arbitrario del llamador.
 typedef void (*kx_reg_iter_cb_t)(int control_id,
                                   const kx_reg_entry_t *entry,
                                   void *user_data);
@@ -190,17 +157,6 @@ void kx_param_store_foreach(kx_param_iter_cb_t cb, void *user_data);
 // =============================================================
 // API pública — Nivel 3 (caché de registros Modbus)
 // =============================================================
-
-// Inserta o actualiza la entrada (reg, fc_read, fc_write) con
-// el valor leído en este ciclo.  Se llama desde kx_modbus_master
-// tras cada lectura exitosa del bus.
-//
-// Si la clave aún no existe, se crea la entrada con los campos
-// de escritura inicializados a "nunca escrito" (FLT_MAX / 0).
-// Si ya existe, solo se actualizan value y ts_last_read.
-//
-// Devuelve un puntero mutable a la entrada resultante, o NULL
-// si falla la asignación de memoria.
 kx_reg_entry_t *kx_param_store_reg_upsert_read(int      control_id,
                                                 uint16_t reg,
                                                 uint8_t  fc_read,
@@ -208,10 +164,6 @@ kx_reg_entry_t *kx_param_store_reg_upsert_read(int      control_id,
                                                 float    value,
                                                 int64_t  ts_ms);
 
-// Actualiza los campos de escritura de la entrada existente.
-// Solo se llama desde kx_modbus_master tras una escritura exitosa.
-// Si la entrada no existe (nunca fue registrada al parsear), no
-// se crea: devuelve ESP_ERR_NOT_FOUND.
 esp_err_t kx_param_store_reg_upsert_write(int      control_id,
                                            uint16_t reg,
                                            uint8_t  fc_read,
@@ -219,30 +171,22 @@ esp_err_t kx_param_store_reg_upsert_write(int      control_id,
                                            float    value,
                                            int64_t  ts_ms);
 
-// Búsqueda de solo lectura.
-// Devuelve NULL si la clave (reg, fc_read, fc_write) no existe.
 const kx_reg_entry_t *kx_param_store_reg_get(int      control_id,
                                                uint16_t reg,
                                                uint8_t  fc_read,
                                                uint8_t  fc_write);
 
-// Búsqueda mutable — solo para uso interno de kx_modbus_master.
 kx_reg_entry_t *kx_param_store_reg_get_mutable(int      control_id,
                                                 uint16_t reg,
                                                 uint8_t  fc_read,
                                                 uint8_t  fc_write);
 
-// Número de entradas únicas en el nivel 3 para un control dado.
-int kx_param_store_reg_count(int control_id);
+int  kx_param_store_reg_count(int control_id);
 
-// Itera todas las entradas de nivel 3 de un control.
-// Útil para diagnóstico y para ciclos de poll que quieran
-// operar sobre registros en lugar de params.
 void kx_param_store_reg_foreach(int control_id,
                                  kx_reg_iter_cb_t cb,
                                  void *user_data);
 
-// Itera las entradas de nivel 3 de TODOS los controles.
 void kx_param_store_reg_foreach_all(kx_reg_iter_cb_t cb, void *user_data);
 
 // =============================================================
@@ -262,9 +206,6 @@ void kx_param_store_set_uuid(int control_id, const char *uuid);
 double kx_param_store_get_update_ts(int control_id);
 void   kx_param_store_set_update_ts(int control_id, double ts);
 
-// Borra entities (nivel 2) Y caché de registros (nivel 3)
-// del control indicado, y marca entities_ready=false.
-// Llamar antes de relanzar entities-discovery cuando ts es mayor.
 void kx_param_store_clear_entities(int control_id);
 
 esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts);
@@ -282,6 +223,3 @@ static inline const kx_control_params_t *kx_param_store_get(int control_id)
 {
     return kx_param_store_get_ctrl(control_id);
 }
-
-void kx_param_pub_error(int control_id, int param_id,
-                         const char *msg, uint16_t reg);

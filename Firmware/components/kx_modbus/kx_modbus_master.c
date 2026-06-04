@@ -94,10 +94,6 @@ static QueueHandle_t s_write_queue = NULL;
 // =============================================================
 // Cola de demandas de poll
 // =============================================================
-#ifndef KX_DEMAND_REPEAT_MS
-#define KX_DEMAND_REPEAT_MS  5000
-#endif
-
 #define DEMAND_QUEUE_SIZE    1500
 #define DEMAND_WARN_HWM       700
 
@@ -154,12 +150,6 @@ static EventGroupHandle_t  s_poll_eg       = NULL;
 static SemaphoreHandle_t   s_foreach_mutex = NULL;
 static volatile bool       s_running       = false;
 static TaskHandle_t        s_task          = NULL;
-
-// =============================================================
-// Forward declarations
-// =============================================================
-static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
-                             uint8_t fc, const kx_param_t *param);
 
 // =============================================================
 // _enqueue
@@ -387,13 +377,6 @@ static float _read_register_ex(uint8_t slave_addr, uint16_t reg_addr,
     return value;
 }
 
-// Wrapper sin raw (compatibilidad interna)
-static float _read_register(uint8_t slave_addr, uint16_t reg_addr,
-                             uint8_t fc, const kx_param_t *param)
-{
-    return _read_register_ex(slave_addr, reg_addr, fc, param, NULL);
-}
-
 // =============================================================
 // _publish_all_params_for_reg
 //
@@ -428,10 +411,6 @@ static int _publish_all_params_for_reg(int           control_id,
                 (uint8_t) p->function_read == fc_read &&
                 p->view != 0) {
 
-                // En modo report, respetar el sampling individual de cada param.
-                // Si el tick actual no es multiplo del sampling de este param,
-                // no corresponde publicarlo aunque comparta registro con otro
-                // que si tenga el tick alineado.
                 if (tick_s >= 0) {
                     if (p->sampling <= 0 ||
                         (tick_s % (int64_t)p->sampling) != 0) {
@@ -651,7 +630,6 @@ static int _dispatch_packet(const kx_packet_t *pkt,
                 continue;
             }
 
-            // Actualizar nivel 3 con el valor transformado del primer param
             float value_first = (float)(int16_t)raw;
             if (param->offset != 0.0f && param->offset != 1.0f)
                 value_first *= param->offset;
@@ -663,7 +641,6 @@ static int _dispatch_packet(const kx_packet_t *pkt,
                 slot->control_id, slot->reg, pkt->fc,
                 (uint8_t)param->function_write, value_first, ts_ms);
 
-            // Fan-out con filtro de tick para modo report
             int n = _publish_all_params_for_reg(
                         slot->control_id, slot->reg,
                         pkt->fc, raw, ts_ms, pub_kind, tick_s);
@@ -729,34 +706,64 @@ static esp_err_t _execute_write(int control_id, int param_id, float value)
              control_id, param_id, param->reg, fc_write,
              ctrl->slave_addr, value, (int)(uint16_t)raw, (uint16_t)raw);
 
-    uint8_t frame[6] = {
-        (uint8_t)ctrl->slave_addr, fc_write,
-        (uint8_t)((uint16_t)param->reg >> 8),
-        (uint8_t)((uint16_t)param->reg & 0xFF),
-        (uint8_t)((uint16_t)raw >> 8),
-        (uint8_t)((uint16_t)raw & 0xFF),
-    };
     uint8_t resp[16];
     int rx = -1;
-    for (int a = 0; a < MODBUS_RETRY_COUNT && rx < 0; a++) {
-        rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
-        if (rx < 0) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
-    }
 
-    if (rx < 0) {
-        ESP_LOGW(TAG, "write: no response after %d retries ctrl=%d param=%d",
-                 MODBUS_RETRY_COUNT, control_id, param_id);
-        return ESP_FAIL;
+    if (fc_write == MB_FC_WRITE_MULTIPLE_REGS) {
+        // FC 0x10: [slave][0x10][reg_hi][reg_lo][0x00][0x01][0x02][data_hi][data_lo]
+        // Respuesta esperada: 6 bytes [slave][0x10][reg_hi][reg_lo][0x00][0x01]
+        uint8_t frame[9] = {
+            (uint8_t)ctrl->slave_addr, MB_FC_WRITE_MULTIPLE_REGS,
+            (uint8_t)((uint16_t)param->reg >> 8),
+            (uint8_t)((uint16_t)param->reg & 0xFF),
+            0x00, 0x01,   // quantity: 1 registro
+            0x02,         // byte count: 2 bytes
+            (uint8_t)((uint16_t)raw >> 8),
+            (uint8_t)((uint16_t)raw & 0xFF),
+        };
+        for (int a = 0; a < MODBUS_RETRY_COUNT && rx < 0; a++) {
+            rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
+            if (rx < 0) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
+        }
+        if (rx < 0) {
+            ESP_LOGW(TAG, "write FC10: no response after %d retries ctrl=%d param=%d",
+                     MODBUS_RETRY_COUNT, control_id, param_id);
+            return ESP_FAIL;
+        }
+        // Respuesta válida: 6 bytes, echo de slave+FC+reg+quantity
+        if (rx < 6 || resp[0] != frame[0] || resp[1] != frame[1] ||
+            resp[2] != frame[2] || resp[3] != frame[3]) {
+            ESP_LOGW(TAG, "write FC10: unexpected response rx=%d", rx);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "write FC10: OK raw=%d (0x%04X)", (int)(uint16_t)raw, (uint16_t)raw);
+    } else {
+        // FC 0x05 / FC 0x06: trama de 6 bytes, respuesta echo de 6 bytes
+        uint8_t frame[6] = {
+            (uint8_t)ctrl->slave_addr, fc_write,
+            (uint8_t)((uint16_t)param->reg >> 8),
+            (uint8_t)((uint16_t)param->reg & 0xFF),
+            (uint8_t)((uint16_t)raw >> 8),
+            (uint8_t)((uint16_t)raw & 0xFF),
+        };
+        for (int a = 0; a < MODBUS_RETRY_COUNT && rx < 0; a++) {
+            rx = _modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
+            if (rx < 0) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
+        }
+        if (rx < 0) {
+            ESP_LOGW(TAG, "write: no response after %d retries ctrl=%d param=%d",
+                     MODBUS_RETRY_COUNT, control_id, param_id);
+            return ESP_FAIL;
+        }
+        if (rx < 6 || resp[0] != frame[0] || resp[1] != frame[1] ||
+            resp[2] != frame[2] || resp[3] != frame[3]) {
+            ESP_LOGW(TAG, "write: unexpected response rx=%d", rx);
+            return ESP_FAIL;
+        }
+        uint16_t echo = ((uint16_t)resp[4] << 8) | resp[5];
+        ESP_LOGI(TAG, "write: OK raw_sent=%d raw_echo=%d",
+                 (int)(uint16_t)raw, (int)echo);
     }
-    if (rx < 6 ||
-        resp[0] != frame[0] || resp[1] != frame[1] ||
-        resp[2] != frame[2] || resp[3] != frame[3]) {
-        ESP_LOGW(TAG, "write: unexpected response rx=%d", rx);
-        return ESP_FAIL;
-    }
-    uint16_t echo = ((uint16_t)resp[4] << 8) | resp[5];
-    ESP_LOGI(TAG, "write: OK raw_sent=%d raw_echo=%d",
-             (int)(uint16_t)raw, (int)echo);
     return ESP_OK;
 }
 
@@ -820,9 +827,6 @@ typedef struct { int target_param_id; int found_ctrl_id; } _find_ctrl_ctx_t;
 
 // =============================================================
 // _dispatch_control_packets
-//
-// tick_s == -1  -> modo demand
-// tick_s >= 0   -> modo report, propagado a _dispatch_packet
 // =============================================================
 static void _dispatch_control_packets(kx_packet_list_t *list,
                                       kx_pub_kind_t pub_kind,
@@ -898,12 +902,6 @@ static void _poll_ctrl_cb(int ctrl_id, const kx_param_t *param, void *ud)
 #define MAX_CTRLS_IN_BATCH  KX_PARAM_MAX_CONTROLS
 #define MAX_PARAMS_IN_BATCH 1500
 
-typedef struct {
-    int ctrl_id;
-    int param_ids[MAX_PARAMS_IN_BATCH];
-    int n_params;
-} _ctrl_group_t;
-
 static void _find_ctrl_cb(int ctrl_id, const kx_param_t *param, void *ud)
 {
     _find_ctrl_ctx_t *ctx = (_find_ctrl_ctx_t *)ud;
@@ -917,6 +915,12 @@ typedef struct {
     bool dropped;
     char err_msg[48];
 } _batch_result_t;
+
+typedef struct {
+    int ctrl_id;
+    int param_ids[MAX_PARAMS_IN_BATCH];
+    int n_params;
+} _ctrl_group_t;
 
 static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
                                    int valid_count,
@@ -1020,7 +1024,6 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
         if (out_packaged) *out_packaged += kx_pkt_real_param_count(list);
 
         int ctrl_ok = 0, ctrl_errors = 0;
-        // Modo demand: tick_s = -1
         _dispatch_control_packets(list, PUB_KIND_STATUS,
                                   &ctrl_ok, &ctrl_errors, -1);
         *out_ok     += ctrl_ok;
@@ -1057,6 +1060,93 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
         }
 
         kx_pkt_free(list);
+
+        // ── Fallback para params no resueltos del grupo ───────
+        // Tras el dispatch packetizado, algunos params pueden quedar
+        // sin resultado por ser write-only, view=0 o fc_read>0 no
+        // agrupable. Los tratamos aquí individualmente.
+        for (int j = 0; j < grp->n_params; j++) {
+            int pid = grp->param_ids[j];
+
+            // Buscar si este pid ya quedó resuelto
+            bool already_ok = false;
+            int  result_idx = -1;
+            for (int i = 0; i < valid_count; i++) {
+                if (snapshot[i].param_id == pid) {
+                    result_idx = i;
+                    already_ok = results[i].ok;
+                    break;
+                }
+            }
+            if (already_ok || result_idx < 0) continue;
+
+            _find_ctrl_ctx_t fctx3 = { .target_param_id = pid,
+                                        .found_ctrl_id   = -1 };
+            kx_param_store_foreach(_find_ctrl_cb, &fctx3);
+            if (fctx3.found_ctrl_id < 0) continue;
+
+            const kx_param_t *p =
+                kx_param_store_get_param(fctx3.found_ctrl_id, pid);
+            if (!p) continue;
+
+            // view=0 → skip silencioso
+            if (p->view == 0) {
+                results[result_idx].ok = true;  // no es un error real
+                continue;
+            }
+
+            // write-only (fc_read == 0)
+            if (p->function_read == 0) {
+                if (p->last_published_value != FLT_MAX) {
+                    // Tiene valor previo → publicar status con ese valor
+                    _enqueue(PUB_KIND_STATUS, fctx3.found_ctrl_id, pid,
+                             p->last_published_value, 0, NULL);
+                    results[result_idx].ok = true;
+                } else {
+                    // Sin valor conocido → error
+                    _enqueue(PUB_KIND_ERROR, fctx3.found_ctrl_id, pid,
+                             0.0f, (uint16_t)p->reg, "write_only_no_value");
+                    snprintf(results[result_idx].err_msg,
+                             sizeof(results[result_idx].err_msg),
+                             "write_only_no_value");
+                }
+                continue;
+            }
+
+            // fc_read > 0 → lectura individual bajo mutex
+            const kx_control_t *ctrl_info =
+                kx_param_store_get_ctrl(fctx3.found_ctrl_id);
+            if (!ctrl_info || ctrl_info->slave_addr == 0) continue;
+
+            xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
+            uint16_t raw = 0;
+            float val = _read_register_ex(
+                (uint8_t)ctrl_info->slave_addr,
+                (uint16_t)p->reg,
+                (uint8_t)p->function_read,
+                p, &raw);
+            int64_t ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
+
+            if (val == -FLT_MAX) {
+                _enqueue(PUB_KIND_ERROR, fctx3.found_ctrl_id, pid,
+                         0.0f, (uint16_t)p->reg, "modbus_timeout");
+                snprintf(results[result_idx].err_msg,
+                         sizeof(results[result_idx].err_msg),
+                         "modbus_timeout");
+            } else {
+                kx_param_store_reg_upsert_read(
+                    fctx3.found_ctrl_id, (uint16_t)p->reg,
+                    (uint8_t)p->function_read,
+                    (uint8_t)p->function_write, val, ts_ms);
+                _publish_all_params_for_reg(
+                    fctx3.found_ctrl_id, (uint16_t)p->reg,
+                    (uint8_t)p->function_read,
+                    raw, ts_ms, PUB_KIND_STATUS, -1);
+                results[result_idx].ok = true;
+            }
+            xSemaphoreGive(s_foreach_mutex);
+        }
+        // ── Fin fallback ──────────────────────────────────────
     }
 
     *out_ok = 0; *out_errors = 0;
@@ -1079,7 +1169,6 @@ static void _report_control_packetized(int control_id, _report_ctx_t *rctx)
                                            rctx->tick_s, now_ms);
     if (!list) return;
 
-    // Acumular param_ids de los slots reales para el log del box
     for (int i = 0; i < list->count; i++) {
         const kx_packet_t *pkt = &list->pkts[i];
         for (int s = 0; s < pkt->num_slots; s++) {
@@ -1090,8 +1179,6 @@ static void _report_control_packetized(int control_id, _report_ctx_t *rctx)
         }
     }
 
-    // Modo report: pasar tick_s para que _publish_all_params_for_reg
-    // filtre correctamente los params hermanos en el mismo registro.
     _dispatch_control_packets(list, PUB_KIND_REPORT,
                               &rctx->sent, &rctx->errors, rctx->tick_s);
     kx_pkt_free(list);
@@ -1384,7 +1471,6 @@ static void _modbus_task(void *arg)
         printf("│  write_queue : hwm=%-3d / %-5d slots                        │\n",
                write_hwm, WRITE_QUEUE_SIZE);
 
-
         if (batch_ok > 0) {
             printf("├──────────────────────────────────────────────────────────────┤\n");
             printf("│  ✓ Params OK:                                                │\n│    ");
@@ -1536,43 +1622,3 @@ esp_err_t kx_modbus_master_start(void)
 
 void kx_modbus_master_stop(void) { s_running = false; }
 bool kx_modbus_master_is_running(void) { return s_running; }
-
-// =============================================================
-// kx_modbus_read_one (API sincrona externa)
-// =============================================================
-esp_err_t kx_modbus_read_one(int control_id, int param_id)
-{
-    const kx_param_t *param = kx_param_store_get_param(control_id, param_id);
-    if (!param) return ESP_ERR_NOT_FOUND;
-    const kx_control_params_t *ctrl = kx_param_store_get(control_id);
-    if (!ctrl || ctrl->slave_addr == 0) return ESP_ERR_INVALID_STATE;
-
-    xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
-    uint16_t raw = 0;
-    float value = _read_register_ex((uint8_t)ctrl->slave_addr,
-                                     (uint16_t)param->reg,
-                                     (uint8_t)param->function_read,
-                                     param, &raw);
-    xSemaphoreGive(s_foreach_mutex);
-
-    if (value == -FLT_MAX) {
-        kx_param_pub_error(control_id, param->param_id,
-                           "modbus_timeout", (uint16_t)param->reg);
-        return ESP_FAIL;
-    }
-
-    int64_t ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
-    // Modo demand (tick_s = -1): publicar todos los params del registro
-    _publish_all_params_for_reg(control_id, (uint16_t)param->reg,
-                                 (uint8_t)param->function_read,
-                                 raw, ts_ms, PUB_KIND_STATUS, -1);
-    return ESP_OK;
-}
-
-// =============================================================
-// kx_modbus_write_one -- encola
-// =============================================================
-esp_err_t kx_modbus_write_one(int control_id, int param_id, float value)
-{
-    return kx_modbus_enqueue_write(control_id, param_id, value, 0.0);
-}
