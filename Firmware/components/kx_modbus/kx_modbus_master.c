@@ -60,19 +60,20 @@ static const char *TAG = "kx_modbus";
 #define PUB_BACKPRESSURE_WAIT_MS      20
 #define PUB_BACKPRESSURE_TIMEOUT_MS 2000
 
-typedef enum {
-    PUB_KIND_STATUS,
-    PUB_KIND_REPORT,
-    PUB_KIND_ERROR,
-} kx_pub_kind_t;
+// Firma comun para status/report: (control_id, param_id, value)
+typedef void (*kx_pub_fn_t)(int control_id, int param_id, float value);
+// Firma para error: (control_id, param_id, msg, reg)
+typedef void (*kx_pub_err_fn_t)(int control_id, int param_id,
+                                 const char *msg, uint16_t reg);
 
 typedef struct {
-    kx_pub_kind_t kind;
-    int           control_id;
-    int           param_id;
-    uint16_t      reg;
-    float         value;
-    char          error_msg[32];
+    kx_pub_fn_t     pub_fn;      // != NULL -> status o report
+    kx_pub_err_fn_t pub_err_fn;  // != NULL -> error
+    int             control_id;
+    int             param_id;
+    uint16_t        reg;
+    float           value;
+    char            error_msg[32];
 } kx_pub_result_t;
 
 static QueueHandle_t s_pub_queue = NULL;
@@ -154,11 +155,13 @@ static TaskHandle_t        s_task          = NULL;
 // =============================================================
 // _enqueue
 // =============================================================
-static bool _enqueue(kx_pub_kind_t kind, int ctrl_id, int param_id,
+static bool _enqueue(kx_pub_fn_t pub_fn, kx_pub_err_fn_t pub_err_fn,
+                     int ctrl_id, int param_id,
                      float value, uint16_t reg, const char *errmsg)
 {
     kx_pub_result_t r = {
-        .kind       = kind,
+        .pub_fn     = pub_fn,
+        .pub_err_fn = pub_err_fn,
         .control_id = ctrl_id,
         .param_id   = param_id,
         .reg        = reg,
@@ -394,7 +397,7 @@ static int _publish_all_params_for_reg(int           control_id,
                                         uint8_t       fc_read,
                                         uint16_t      raw,
                                         int64_t       ts_ms,
-                                        kx_pub_kind_t pub_kind,
+                                        kx_pub_fn_t   pub_fn,
                                         int64_t       tick_s)
 {
     int published = 0;
@@ -429,7 +432,7 @@ static int _publish_all_params_for_reg(int           control_id,
                 p->ts_last_read         = ts_ms;
                 p->last_published_value = value;
 
-                _enqueue(pub_kind, control_id, p->param_id, value, 0, NULL);
+                _enqueue(pub_fn, NULL, control_id, p->param_id, value, 0, NULL);
                 published++;
             }
             pn = pn->next;
@@ -468,7 +471,7 @@ static int _read_registers_multi(uint8_t slave_addr,
 // tick_s >= 0   -> modo report, se propaga a _publish_all_params_for_reg
 // =============================================================
 static int _dispatch_packet(const kx_packet_t *pkt,
-                             kx_pub_kind_t pub_kind,
+                             kx_pub_fn_t   pub_fn,
                              int *out_errors,
                              int64_t tick_s)
 {
@@ -497,7 +500,7 @@ static int _dispatch_packet(const kx_packet_t *pkt,
         int64_t ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
 
         if (value == -FLT_MAX) {
-            _enqueue(PUB_KIND_ERROR, slot->control_id, slot->param_id,
+            _enqueue(NULL, kx_param_pub_error, slot->control_id, slot->param_id,
                      0.0f, pkt->start_reg, "modbus_timeout");
             err_count++;
         } else {
@@ -507,7 +510,7 @@ static int _dispatch_packet(const kx_packet_t *pkt,
 
             int n = _publish_all_params_for_reg(
                         slot->control_id, pkt->start_reg,
-                        pkt->fc, raw, ts_ms, pub_kind, tick_s);
+                        pkt->fc, raw, ts_ms, pub_fn, tick_s);
             ok_count += (n > 0) ? n : 1;
         }
         goto dispatch_done;
@@ -539,7 +542,7 @@ static int _dispatch_packet(const kx_packet_t *pkt,
                                                  pkt->fc, param, &raw);
                 ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
                 if (value == -FLT_MAX) {
-                    _enqueue(PUB_KIND_ERROR, slot->control_id, slot->param_id,
+                    _enqueue(NULL, kx_param_pub_error, slot->control_id, slot->param_id,
                              0.0f, slot->reg, "modbus_timeout");
                     err_count++;
                 } else {
@@ -548,7 +551,7 @@ static int _dispatch_packet(const kx_packet_t *pkt,
                         (uint8_t)param->function_write, value, ts_ms);
                     int n = _publish_all_params_for_reg(
                                 slot->control_id, slot->reg,
-                                pkt->fc, raw, ts_ms, pub_kind, tick_s);
+                                pkt->fc, raw, ts_ms, pub_fn, tick_s);
                     ok_count += (n > 0) ? n : 1;
                 }
                 vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
@@ -579,7 +582,7 @@ static int _dispatch_packet(const kx_packet_t *pkt,
                                                  pkt->fc, param, &raw);
                 ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
                 if (value == -FLT_MAX) {
-                    _enqueue(PUB_KIND_ERROR, slot->control_id, slot->param_id,
+                    _enqueue(NULL, kx_param_pub_error, slot->control_id, slot->param_id,
                              0.0f, slot->reg, "modbus_timeout");
                     err_count++;
                 } else {
@@ -588,7 +591,7 @@ static int _dispatch_packet(const kx_packet_t *pkt,
                         (uint8_t)param->function_write, value, ts_ms);
                     int n = _publish_all_params_for_reg(
                                 slot->control_id, slot->reg,
-                                pkt->fc, raw, ts_ms, pub_kind, tick_s);
+                                pkt->fc, raw, ts_ms, pub_fn, tick_s);
                     ok_count += (n > 0) ? n : 1;
                 }
                 vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
@@ -643,7 +646,7 @@ static int _dispatch_packet(const kx_packet_t *pkt,
 
             int n = _publish_all_params_for_reg(
                         slot->control_id, slot->reg,
-                        pkt->fc, raw, ts_ms, pub_kind, tick_s);
+                        pkt->fc, raw, ts_ms, pub_fn, tick_s);
             ok_count += (n > 0) ? n : 1;
         }
     }
@@ -789,12 +792,12 @@ static void _writer_task(void *arg)
 
         if (err == ESP_OK) {
             kx_param_store_set_ts_set(cmd.control_id, cmd.param_id, cmd.ts);
-            _enqueue(PUB_KIND_STATUS, cmd.control_id, cmd.param_id,
+            _enqueue(kx_param_pub_status, NULL, cmd.control_id, cmd.param_id,
                      cmd.value, 0, NULL);
             ESP_LOGI(TAG, "writer: OK ctrl=%d param=%d value=%.3f",
                      cmd.control_id, cmd.param_id, cmd.value);
         } else {
-            _enqueue(PUB_KIND_ERROR, cmd.control_id, cmd.param_id,
+            _enqueue(NULL, kx_param_pub_error, cmd.control_id, cmd.param_id,
                      0.0f, 0, "modbus_write_error");
             ESP_LOGW(TAG, "writer: FAIL ctrl=%d param=%d err=%s",
                      cmd.control_id, cmd.param_id, esp_err_to_name(err));
@@ -829,7 +832,7 @@ typedef struct { int target_param_id; int found_ctrl_id; } _find_ctrl_ctx_t;
 // _dispatch_control_packets
 // =============================================================
 static void _dispatch_control_packets(kx_packet_list_t *list,
-                                      kx_pub_kind_t pub_kind,
+                                      kx_pub_fn_t   pub_fn,
                                       int *out_ok,
                                       int *out_errors,
                                       int64_t tick_s)
@@ -839,7 +842,7 @@ static void _dispatch_control_packets(kx_packet_list_t *list,
 
         xSemaphoreTake(s_foreach_mutex, portMAX_DELAY);
         int pkt_errors = 0;
-        int pkt_ok = _dispatch_packet(pkt, pub_kind, &pkt_errors, tick_s);
+        int pkt_ok = _dispatch_packet(pkt, pub_fn, &pkt_errors, tick_s);
         xSemaphoreGive(s_foreach_mutex);
 
         if (out_ok)     *out_ok     += pkt_ok;
@@ -870,7 +873,7 @@ static void _poll_control_packetized(int control_id, _poll_ctx_t *ctx)
     kx_pkt_dump(list, TAG);
 #endif
 
-    _dispatch_control_packets(list, PUB_KIND_STATUS, &ctx->ok, &ctx->errors, -1);
+    _dispatch_control_packets(list, kx_param_pub_status, &ctx->ok, &ctx->errors, -1);
     ctx->done = ctx->ok + ctx->errors;
 
     kx_pkt_free(list);
@@ -1024,7 +1027,7 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
         if (out_packaged) *out_packaged += kx_pkt_real_param_count(list);
 
         int ctrl_ok = 0, ctrl_errors = 0;
-        _dispatch_control_packets(list, PUB_KIND_STATUS,
+        _dispatch_control_packets(list, kx_param_pub_status,
                                   &ctrl_ok, &ctrl_errors, -1);
         *out_ok     += ctrl_ok;
         *out_errors += ctrl_errors;
@@ -1099,12 +1102,12 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
             if (p->function_read == 0) {
                 if (p->last_published_value != FLT_MAX) {
                     // Tiene valor previo → publicar status con ese valor
-                    _enqueue(PUB_KIND_STATUS, fctx3.found_ctrl_id, pid,
+                    _enqueue(kx_param_pub_status, NULL, fctx3.found_ctrl_id, pid,
                              p->last_published_value, 0, NULL);
                     results[result_idx].ok = true;
                 } else {
                     // Sin valor conocido → error
-                    _enqueue(PUB_KIND_ERROR, fctx3.found_ctrl_id, pid,
+                    _enqueue(NULL, kx_param_pub_error, fctx3.found_ctrl_id, pid,
                              0.0f, (uint16_t)p->reg, "write_only_no_value");
                     snprintf(results[result_idx].err_msg,
                              sizeof(results[result_idx].err_msg),
@@ -1128,7 +1131,7 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
             int64_t ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
 
             if (val == -FLT_MAX) {
-                _enqueue(PUB_KIND_ERROR, fctx3.found_ctrl_id, pid,
+                _enqueue(NULL, kx_param_pub_error, fctx3.found_ctrl_id, pid,
                          0.0f, (uint16_t)p->reg, "modbus_timeout");
                 snprintf(results[result_idx].err_msg,
                          sizeof(results[result_idx].err_msg),
@@ -1141,7 +1144,7 @@ static void _poll_batch_packetized(const kx_poll_demand_t *snapshot,
                 _publish_all_params_for_reg(
                     fctx3.found_ctrl_id, (uint16_t)p->reg,
                     (uint8_t)p->function_read,
-                    raw, ts_ms, PUB_KIND_STATUS, -1);
+                    raw, ts_ms, kx_param_pub_status, -1);
                 results[result_idx].ok = true;
             }
             xSemaphoreGive(s_foreach_mutex);
@@ -1179,7 +1182,7 @@ static void _report_control_packetized(int control_id, _report_ctx_t *rctx)
         }
     }
 
-    _dispatch_control_packets(list, PUB_KIND_REPORT,
+    _dispatch_control_packets(list, kx_param_pub_report,
                               &rctx->sent, &rctx->errors, rctx->tick_s);
     kx_pkt_free(list);
 }
@@ -1280,11 +1283,10 @@ static void _publisher_task(void *arg)
     ESP_LOGI(TAG, "publisher task started (queue_size=%d)", PUB_QUEUE_SIZE);
     while (1) {
         if (xQueueReceive(s_pub_queue, &r, portMAX_DELAY) == pdTRUE) {
-            switch (r.kind) {
-            case PUB_KIND_STATUS: kx_param_pub_status(r.control_id, r.param_id, r.value); break;
-            case PUB_KIND_REPORT: kx_param_pub_report(r.control_id, r.param_id, r.value); break;
-            case PUB_KIND_ERROR:  kx_param_pub_error (r.control_id, r.param_id, r.error_msg, r.reg); break;
-            }
+            if (r.pub_fn)
+                r.pub_fn(r.control_id, r.param_id, r.value);
+            else if (r.pub_err_fn)
+                r.pub_err_fn(r.control_id, r.param_id, r.error_msg, r.reg);
         }
     }
 }
