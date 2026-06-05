@@ -1,5 +1,8 @@
 idf_component_register(
-    SRCS "kx_modbus_packetizer.c" "kx_modbus_master.c" "kx_modbus_packetizer.c"
+    SRCS
+        "kx_modbus_uart.c"
+        "kx_modbus_packetizer.c"
+        "kx_modbus_master.c"
     INCLUDE_DIRS "."
     REQUIRES
         kx_system
