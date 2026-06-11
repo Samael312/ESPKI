@@ -97,7 +97,7 @@ static SemaphoreHandle_t s_sock_mutex = NULL;
 #define STACK_TCP_DEMAND   5120   // era 8192
 #define STACK_TCP_WRITER   3072   // era 4096
 #define STACK_TCP_REPORT   3072   // era 4096
-#define STACK_TCP_PUB      2048   // era 4096 — solo hace publish MQTT
+#define STACK_TCP_PUB      4096   
 
 #define POLL_ALLOWED_BIT  BIT0
 #define DEMAND_BIT        BIT1
