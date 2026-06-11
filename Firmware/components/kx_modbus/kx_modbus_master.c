@@ -352,11 +352,11 @@ static int _dispatch_packet(const kx_packet_t *pkt,
 
         // Fallback individual si el multi falla
         if (rx < 0) {
-            ESP_LOGW(TAG,
-                     "multi FAILED (slave=%d fc=0x%02x reg=0x%04x num=%d) "
-                     "-- fallback individual",
-                     pkt->slave_addr, pkt->fc,
-                     pkt->start_reg, pkt->num_regs);
+            //ESP_LOGW(TAG,
+            //         "multi FAILED (slave=%d fc=0x%02x reg=0x%04x num=%d) "
+            //         "-- fallback individual",
+            //         pkt->slave_addr, pkt->fc,
+            //         pkt->start_reg, pkt->num_regs);
             for (int s = 0; s < pkt->num_slots; s++) {
                 const kx_pkt_slot_t *slot = &pkt->slots[s];
                 if (slot->is_gap || slot->param_id < 0) continue;

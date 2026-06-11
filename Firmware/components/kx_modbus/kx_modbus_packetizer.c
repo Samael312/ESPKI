@@ -178,6 +178,44 @@ static void _flush_group(kx_packet_list_t *list,
         while (g_end + 1 < n_group && group[g_end + 1].reg <= win_end)
             g_end++;
 
+        // ── Contar gaps en el rango ───────────────────────────
+        // Si el rango tiene huecos (registros entre win_start y
+        // group[g_end].reg que no aparecen en el grupo), partir
+        // en packets individuales para no leer registros inexistentes.
+        int n_in_window = g_end - g_start + 1;
+        int reg_span    = (int)group[g_end].reg - (int)group[g_start].reg + 1;
+        bool has_gaps   = (reg_span > n_in_window);
+
+        if (has_gaps) {
+            // Emitir un packet individual por cada candidato del grupo
+            for (int k = g_start; k <= g_end; k++) {
+                if (!_list_ensure(list)) return;
+                kx_packet_t *pkt = &list->pkts[list->count];
+                memset(pkt, 0, sizeof(*pkt));
+
+                pkt->slave_addr = slave_addr;
+                pkt->fc         = fc;
+                pkt->start_reg  = group[k].reg;
+                pkt->num_regs   = 1;
+                pkt->num_slots  = 1;
+
+                kx_pkt_slot_t *slot = &pkt->slots[0];
+                slot->control_id = group[k].control_id;
+                slot->param_id   = group[k].param_id;
+                slot->reg        = group[k].reg;
+                slot->is_gap     = false;
+
+                list->count++;
+
+                ESP_LOGD(TAG, "packet[%d]: slave=%d fc=0x%02x reg=0x%04x "
+                         "num_regs=1 slots=1 (individual/no-gap)",
+                         list->count - 1, slave_addr, fc, group[k].reg);
+            }
+            g_start = g_end + 1;
+            continue;
+        }
+
+        // Sin gaps — packet multi normal
         if (!_list_ensure(list)) return;
         kx_packet_t *pkt = &list->pkts[list->count];
         memset(pkt, 0, sizeof(*pkt));
