@@ -1,14 +1,13 @@
 idf_component_register(
-    SRCS "kx_config_handler.c"
+    SRCS "kx_modbus_tcp.c"
     INCLUDE_DIRS "."
     REQUIRES
         kx_system
         kx_mqtt
         kx_param_store
+        kx_telemetry
         kx_modbus
-        kx_modbus_tcp
         freertos
         esp_timer
-    PRIV_REQUIRES
-        json
+        lwip
 )

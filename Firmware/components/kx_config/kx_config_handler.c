@@ -4,6 +4,7 @@
 #include "../../main/kx_config.h"
 #include "kx_param_store.h"
 #include "kx_modbus_master.h"
+#include "kx_modbus_tcp.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "cJSON.h"
@@ -14,6 +15,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
+#include <inttypes.h>
 
 static const char *TAG = "kx_config";
 
@@ -61,7 +63,6 @@ static void _send_error(const char *config_type,
 static const char *_config_type_from_topic(const char *topic)
 {
     if (strstr(topic, "/entities")) return "entities";
-
     const char *p = strstr(topic, "/controls");
     if (p) {
         p += strlen("/controls");
@@ -69,7 +70,6 @@ static const char *_config_type_from_topic(const char *topic)
         if (*p == '/') return "control_single";
         return "controls_list";
     }
-
     if (strstr(topic, KX_DEVICE_UUID)) return "device";
     return "unknown";
 }
@@ -84,35 +84,19 @@ static int _control_id_from_topic(const char *topic)
 
 // =============================================================
 // controls-discovery
-//
-// Publica en {uuid}/controls con _type=controls-discovery.
-// El bridge escucha ese topic y responde publicando el
-// controls.json en +/{uuid}/controls, que el dispositivo
-// recibe mediante su suscripción +/{uuid}/controls.
-//
-// Referencia:
-//   snprintf(topic, ..., "%s/controls", client_id);
-//   snprintf(payload, ..., "{\"_type\": \"controls-discovery\",
-//                            \"timestamp\": %.3f}", gettimestamp());
 // =============================================================
 void kx_config_request_controls(void)
 {
     char topic[MQTT_MAX_TOPIC_SIZE];
     char payload[256];
-
-    // Topic: {uuid}/controls   
     snprintf(topic, sizeof(topic), "%s/controls", KX_DEVICE_UUID);
-
     snprintf(payload, sizeof(payload),
-             "{\"_type\": \"controls-discovery\", \"timestamp\": %.3f}",
-             _ts());
-
+             "{\"_type\": \"controls-discovery\", \"timestamp\": %.3f}", _ts());
     esp_err_t err = kx_mqtt_publish(topic, payload, 1, 0);
-    if (err == ESP_OK) {
+    if (err == ESP_OK)
         ESP_LOGI(TAG, "controls-discovery → %s", topic);
-    } else {
+    else
         ESP_LOGW(TAG, "controls-discovery publish failed");
-    }
 }
 
 // =============================================================
@@ -122,20 +106,15 @@ static void _request_entities(int control_id)
 {
     char topic[128];
     char payload[128];
-
     snprintf(topic, sizeof(topic),
              "%s/controls/%d/entities", KX_DEVICE_UUID, control_id);
-
     snprintf(payload, sizeof(payload),
-             "{\"_type\": \"entities-discovery\", \"timestamp\": %.3f}",
-             _ts());
-
+             "{\"_type\": \"entities-discovery\", \"timestamp\": %.3f}", _ts());
     esp_err_t err = kx_mqtt_publish(topic, payload, 1, 0);
-    if (err == ESP_OK) {
+    if (err == ESP_OK)
         ESP_LOGI(TAG, "entities-discovery → control_id=%d", control_id);
-    } else {
+    else
         ESP_LOGW(TAG, "entities-discovery failed → control_id=%d", control_id);
-    }
 }
 
 // =============================================================
@@ -145,7 +124,6 @@ static void _publish_control_status(int control_id, const char *uuid)
 {
     char topic[128];
     char payload[256];
-
     snprintf(topic, sizeof(topic),
              "%s/controls/%d/status", KX_DEVICE_UUID, control_id);
     snprintf(payload, sizeof(payload),
@@ -156,7 +134,6 @@ static void _publish_control_status(int control_id, const char *uuid)
         "\"link\":{\"detected\":\"online\"},"
         "\"timestamp\":%.3f}",
         control_id, uuid, _ts());
-
     kx_mqtt_publish(topic, payload, 1, 0);
     ESP_LOGI(TAG, "control-status online → ctrl=%d uuid=%s", control_id, uuid);
 }
@@ -168,20 +145,19 @@ static void _on_entities_progress(int control_id, int received, int total)
 {
     if (total <= 0) return;
     int pct = (received * 100) / total;
-    if (pct == 25 || pct == 50 || pct == 75 || pct == 100) {
+    if (pct == 25 || pct == 50 || pct == 75 || pct == 100)
         ESP_LOGI(TAG, "entities ctrl=%d: %d%% (%d/%d)",
                  control_id, pct, received, total);
-    }
 }
 
 // =============================================================
-// Procesar un control del controls.json
+// _process_single_control
 //
-// Lógica de update_ts:
-//   · ts_incoming == 0  → sin ts en el JSON, siempre relanzar
-//   · ts_incoming > ts_stored  → pausa Modbus, borra entities,
-//     actualiza ts, lanza discovery, reanuda Modbus
-//   · ts_incoming <= ts_stored → caché válida, sin discovery
+// Parsea el JSON de un control individual y configura:
+//   - slave_addr / unit_id
+//   - uuid
+//   - protocolo (RTU o TCP) con su endpoint
+//   - lanza entities-discovery si el update_ts es mayor
 // =============================================================
 static void _process_single_control(cJSON *ctrl_json, int hint_control_id)
 {
@@ -193,19 +169,21 @@ static void _process_single_control(cJSON *ctrl_json, int hint_control_id)
         control_id = (int)id_field->valuedouble;
 
     if (control_id <= 0) {
-        ESP_LOGW(TAG, "control: could not determine control_id, skipping");
+        ESP_LOGW(TAG, "control: no control_id, skipping");
         return;
     }
 
     // ── uuid ──────────────────────────────────────────────────
     char uuid[64] = "";
     cJSON *u = cJSON_GetObjectItem(ctrl_json, "uuid");
-    if (u && cJSON_IsString(u)) snprintf(uuid, sizeof(uuid), "%s", u->valuestring);
+    if (u && cJSON_IsString(u))
+        snprintf(uuid, sizeof(uuid), "%s", u->valuestring);
 
-    // ── slave_addr ────────────────────────────────────────────
+    // ── slave_addr / unit_id ──────────────────────────────────
+    // Siempre viene en control_address (tanto RTU como TCP)
     int slave_addr = 0;
     const char *addr_keys[] = {
-        "slave_addr", "modbus_address", "control_address",
+        "control_address", "slave_addr", "modbus_address",
         "address", "rtu_address", NULL
     };
     for (int k = 0; addr_keys[k]; k++) {
@@ -216,44 +194,111 @@ static void _process_single_control(cJSON *ctrl_json, int hint_control_id)
     // ── update_ts ─────────────────────────────────────────────
     double ts_incoming = 0.0;
     cJSON *ts_field = cJSON_GetObjectItem(ctrl_json, "update_ts");
-    if (ts_field && cJSON_IsNumber(ts_field)) ts_incoming = ts_field->valuedouble;
+    if (ts_field && cJSON_IsNumber(ts_field))
+        ts_incoming = ts_field->valuedouble;
 
     double ts_stored = kx_param_store_get_update_ts(control_id);
 
-    ESP_LOGI(TAG, "ctrl=%d uuid=%s slave=%d ts_in=%.3f ts_stored=%.3f",
-             control_id, uuid, slave_addr, ts_incoming, ts_stored);
+    // ── Parseo del protocolo ──────────────────────────────────
+    // Ruta: metadata → protocol → metadata → active
+    //                                       → tcp → ip / port
+    const char *proto_active  = "rtu";
+    char        tcp_ip[KX_TCP_IP_LEN] = "";
+    uint16_t    tcp_port = 0;
 
-    // ── Actualizar metadatos ──────────────────────────────────
-    if (slave_addr > 0) kx_param_store_set_slave_addr(control_id, slave_addr);
-    if (uuid[0])        kx_param_store_set_uuid(control_id, uuid);
+    cJSON *meta = cJSON_GetObjectItem(ctrl_json, "metadata");
+    if (meta) {
+        cJSON *proto = cJSON_GetObjectItem(meta, "protocol");
+        if (proto) {
+            cJSON *pmeta = cJSON_GetObjectItem(proto, "metadata");
+            if (pmeta) {
+                cJSON *active = cJSON_GetObjectItem(pmeta, "active");
+                if (active && cJSON_IsString(active))
+                    proto_active = active->valuestring;
+
+                if (strcmp(proto_active, "tcp") == 0) {
+                    cJSON *tcp = cJSON_GetObjectItem(pmeta, "tcp");
+                    if (tcp) {
+                        cJSON *ip_j   = cJSON_GetObjectItem(tcp, "ip");
+                        cJSON *port_j = cJSON_GetObjectItem(tcp, "port");
+                        if (ip_j   && cJSON_IsString(ip_j))
+                            snprintf(tcp_ip, sizeof(tcp_ip), "%s",
+                                     ip_j->valuestring);
+                        if (port_j && cJSON_IsNumber(port_j))
+                            tcp_port = (uint16_t)port_j->valuedouble;
+                    }
+                }
+            }
+        }
+    }
+
+    ESP_LOGI(TAG,
+             "ctrl=%d uuid=%s slave=%d proto=%s ts_in=%.3f ts_stored=%.3f",
+             control_id, uuid, slave_addr, proto_active,
+             ts_incoming, ts_stored);
+    if (strcmp(proto_active, "tcp") == 0)
+        ESP_LOGI(TAG, "  TCP endpoint: %s:%" PRIu16, tcp_ip, tcp_port);
+
+    // ── Actualizar metadatos en param_store ───────────────────
+    if (slave_addr > 0)
+        kx_param_store_set_slave_addr(control_id, slave_addr);
+    if (uuid[0])
+        kx_param_store_set_uuid(control_id, uuid);
+
+    // Endpoint TCP — limpia si es RTU
+    if (strcmp(proto_active, "tcp") == 0 && tcp_ip[0] != '\0' && tcp_port > 0)
+        kx_param_store_set_tcp_endpoint(control_id, tcp_ip, tcp_port);
+    else
+        kx_param_store_set_tcp_endpoint(control_id, NULL, 0);
+
+    // ── Arrancar el driver correcto si aún no está activo ─────
+    // Colas y tareas se crean la primera vez que se confirma
+    // un control de ese protocolo. Idempotente: si ya corre no
+    // hace nada. De este modo NO se reserva RAM para un driver
+    // que no tiene ningún control asignado.
+    if (strcmp(proto_active, "tcp") == 0) {
+        esp_err_t dr = kx_modbus_tcp_ensure_started();
+        if (dr != ESP_OK)
+            ESP_LOGE(TAG, "ctrl=%d: TCP driver start failed: %s",
+                     control_id, esp_err_to_name(dr));
+    } else {
+        esp_err_t dr = kx_modbus_master_ensure_started();
+        if (dr != ESP_OK)
+            ESP_LOGE(TAG, "ctrl=%d: RTU driver start failed: %s",
+                     control_id, esp_err_to_name(dr));
+    }
 
     // ── Publicar control-status ───────────────────────────────
     _publish_control_status(control_id, uuid);
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    // ── Decisión de entities ──────────────────────────────────
+    // ── Decisión de entities-discovery ───────────────────────
     bool need_discovery = false;
 
     if (ts_incoming == 0.0) {
-        ESP_LOGI(TAG, "ctrl=%d: no update_ts — forcing entities-discovery", control_id);
+        ESP_LOGI(TAG, "ctrl=%d: no update_ts → forcing discovery", control_id);
         need_discovery = true;
 
     } else if (ts_incoming > ts_stored) {
-        ESP_LOGI(TAG, "ctrl=%d: ts newer (%.3f > %.3f) — refreshing entities",
+        ESP_LOGI(TAG, "ctrl=%d: ts newer (%.3f > %.3f) → refreshing entities",
                  control_id, ts_incoming, ts_stored);
 
-        // pause() espera a que el foreach actual termine antes de retornar
-        if (kx_modbus_master_is_running()) kx_modbus_pause();
+        // Pausar ambos drivers para evitar carreras durante el clear
+        bool rtu_running = kx_modbus_master_is_running();
+        bool tcp_running = kx_modbus_tcp_is_running();
+        if (rtu_running) kx_modbus_pause();
+        if (tcp_running) kx_modbus_tcp_pause();
 
         kx_param_store_clear_entities(control_id);
         kx_param_store_set_update_ts(control_id, ts_incoming);
 
-        if (kx_modbus_master_is_running()) kx_modbus_resume();
+        if (rtu_running) kx_modbus_resume();
+        if (tcp_running) kx_modbus_tcp_resume();
 
         need_discovery = true;
 
     } else {
-        ESP_LOGI(TAG, "ctrl=%d: ts up-to-date (%.3f) — using cached entities",
+        ESP_LOGI(TAG, "ctrl=%d: ts up-to-date (%.3f) → using cached",
                  control_id, ts_stored);
         kx_param_store_print_active_samplings();
     }
@@ -266,22 +311,14 @@ static void _process_single_control(cJSON *ctrl_json, int hint_control_id)
 
 // =============================================================
 // controls_list
-//
-// El bridge puede responder con distintas estructuras.
-// Se prueban en orden:
-//   1. {"controls": [...]}         — array bajo clave "controls"
-//   2. [...]                       — array en raíz
-//   3. {"control": {...}}          — objeto único bajo "control"
-//   4. Objeto raíz con control_id  — objeto único en raíz
 // =============================================================
 static esp_err_t _handle_controls_list(cJSON *root)
 {
-
-    // ── Caso 1: {"controls": [...]} ───────────────────────────
+    // Caso 1: {"controls": [...]}
     cJSON *controls = cJSON_GetObjectItem(root, "controls");
     if (controls && cJSON_IsArray(controls)) {
         int count = cJSON_GetArraySize(controls);
-        ESP_LOGI(TAG, "controls_list (key=controls): %d items", count);
+        ESP_LOGI(TAG, "controls_list: %d items", count);
         kx_mqtt_resize_queue(count);
         kx_param_store_set_expected(count);
         for (int i = 0; i < count; i++) {
@@ -290,8 +327,7 @@ static esp_err_t _handle_controls_list(cJSON *root)
         }
         return ESP_OK;
     }
-
-    // ── Caso 2: array en raíz ─────────────────────────────────
+    // Caso 2: array en raíz
     if (cJSON_IsArray(root)) {
         int count = cJSON_GetArraySize(root);
         ESP_LOGI(TAG, "controls_list (root array): %d items", count);
@@ -303,35 +339,28 @@ static esp_err_t _handle_controls_list(cJSON *root)
         }
         return ESP_OK;
     }
-
-    // ── Caso 3: {"control": {...}} ────────────────────────────
+    // Caso 3: {"control": {...}}
     cJSON *single = cJSON_GetObjectItem(root, "control");
     if (single && cJSON_IsObject(single)) {
-        ESP_LOGI(TAG, "controls_list (key=control): single object");
         kx_mqtt_resize_queue(1);
         kx_param_store_set_expected(1);
         _process_single_control(single, -1);
         return ESP_OK;
     }
-
-    // ── Caso 4: el raíz ES el objeto control ──────────────────
+    // Caso 4: objeto raíz ES el control
     cJSON *id_check = cJSON_GetObjectItem(root, "control_id");
     if (!id_check) id_check = cJSON_GetObjectItem(root, "id");
     if (id_check && cJSON_IsNumber(id_check)) {
-        ESP_LOGI(TAG, "controls_list (root object): single control id=%.0f",
-                 id_check->valuedouble);
         kx_mqtt_resize_queue(1);
         kx_param_store_set_expected(1);
         _process_single_control(root, -1);
         return ESP_OK;
     }
 
-    // ── Sin estructura reconocible ────────────────────────────
     ESP_LOGW(TAG, "controls_list: unrecognized JSON structure");
-    // Volcar claves de primer nivel para diagnóstico
     cJSON *item = root->child;
     while (item) {
-        ESP_LOGW(TAG, "  key: \"%s\" type=%d", item->string ? item->string : "(null)", item->type);
+        ESP_LOGW(TAG, "  key: \"%s\"", item->string ? item->string : "(null)");
         item = item->next;
     }
     return ESP_FAIL;
@@ -352,7 +381,6 @@ static esp_err_t _handle_control_single(cJSON *root, int topic_control_id)
             if (ctrl) _process_single_control(ctrl, topic_control_id);
         }
     } else {
-        // Determinar si el control ya existe para no alterar expected
         int ctrl_id = topic_control_id;
         cJSON *id_f = cJSON_GetObjectItem(root, "control_id");
         if (!id_f) id_f = cJSON_GetObjectItem(root, "id");
@@ -360,16 +388,8 @@ static esp_err_t _handle_control_single(cJSON *root, int topic_control_id)
 
         bool already_exists = (kx_param_store_get_ctrl(ctrl_id) != NULL);
         kx_mqtt_resize_queue(1);
-
-        if (!already_exists) {
+        if (!already_exists)
             kx_param_store_set_expected(kx_param_store_count() + 1);
-            ESP_LOGI(TAG, "control_single: new ctrl=%d, expected -> %d",
-                     ctrl_id, kx_param_store_count() + 1);
-        } else {
-            // Control existente: expected ya fue fijado, no cambiar
-            ESP_LOGI(TAG, "control_single: update existing ctrl=%d, expected unchanged",
-                     ctrl_id);
-        }
 
         _process_single_control(root, topic_control_id);
     }
@@ -378,44 +398,30 @@ static esp_err_t _handle_control_single(cJSON *root, int topic_control_id)
 
 // =============================================================
 // device: +/{uuid}
-// Valida, envía ACK y lanza controls-discovery activo.
 // =============================================================
 static esp_err_t _handle_device(cJSON *root)
 {
     if (!cJSON_GetObjectItem(root, "uuid")) return ESP_FAIL;
-
     ESP_LOGI(TAG, "device.json received — launching controls-discovery");
     _send_ack("device");
-
     vTaskDelay(pdMS_TO_TICKS(200));
     kx_config_request_controls();
-
     return ESP_OK;
 }
 
-
-static void _print_active_sampling_cb(int control_id, const kx_param_t *param, void *user_data)
+// =============================================================
+// Diagnóstico de samplings
+// =============================================================
+static void _print_active_sampling_cb(int control_id, const kx_param_t *param,
+                                       void *user_data)
 {
-    // Filtramos solo los que tengan un muestreo mayor a 0
+    (void)user_data;
     if (param->sampling > 0) {
-        ESP_LOGI("STORE_DEBUG", "Control ID: %d | Param ID: %d | Reg: 0x%04X | Sampling: %ds | Name: %s",
-                 control_id, 
-                 param->param_id, 
-                 param->reg, 
-                 param->sampling, 
-                 param->name);
+        ESP_LOGI("STORE_DEBUG",
+                 "ctrl=%d param=%d reg=0x%04x sampling=%ds name=%s",
+                 control_id, param->param_id, param->reg,
+                 param->sampling, param->name);
     }
-}
-
-// 2. Función pública que puedes llamar cuando desees ver la lista
-void kx_param_store_print_active_samplings(void)
-{
-    ESP_LOGI("STORE_DEBUG", "=== LISTANDO PARÁMETROS CON SAMPLING > 0 ===");
-    
-    // Llamamos al iterador de tu kx_param_store pasando nuestro callback
-    kx_param_store_foreach(_print_active_sampling_cb, NULL);
-    
-    ESP_LOGI("STORE_DEBUG", "===========================================");
 }
 
 // =============================================================
@@ -429,10 +435,9 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
     if (strcmp(config_type, "entities") == 0) {
         int control_id = _control_id_from_topic(topic);
         if (control_id <= 0) {
-            ESP_LOGW(TAG, "entities: could not extract control_id from: %s", topic);
+            ESP_LOGW(TAG, "entities: no control_id in topic: %s", topic);
             return;
         }
-
         ESP_LOGI(TAG, "entities received: topic=%s size=%d heap=%" PRIu32,
                  topic, (int)len, kx_system_heap_free());
 
@@ -478,7 +483,8 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
 
     if (strcmp(config_type, "device") == 0) {
         err = _handle_device(root);
-        if (err != ESP_OK) _send_error("device", "MISSING_FIELD", "uuid required");
+        if (err != ESP_OK)
+            _send_error("device", "MISSING_FIELD", "uuid required");
 
     } else if (strcmp(config_type, "controls_list") == 0) {
         err = _handle_controls_list(root);
@@ -491,7 +497,8 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
         else _send_error("controls", "PARSE_ERROR", "control_single failed");
 
     } else {
-        ESP_LOGW(TAG, "unhandled config type '%s' topic: %s", config_type, topic);
+        ESP_LOGW(TAG, "unhandled config type '%s' topic: %s",
+                 config_type, topic);
     }
 
     cJSON_Delete(root);

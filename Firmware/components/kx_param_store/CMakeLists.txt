@@ -4,6 +4,7 @@ idf_component_register(
     REQUIRES
         esp_timer
         freertos
+	    kx_modbus_tcp
         heap
         nvs_flash
     PRIV_REQUIRES

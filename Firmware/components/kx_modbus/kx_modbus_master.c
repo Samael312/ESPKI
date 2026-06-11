@@ -1450,3 +1450,10 @@ esp_err_t kx_modbus_master_start(void)
 
 void kx_modbus_master_stop(void) { s_running = false; }
 bool kx_modbus_master_is_running(void) { return s_running; }
+
+esp_err_t kx_modbus_master_ensure_started(void)
+{
+    if (s_running) return ESP_OK;
+    ESP_LOGI(TAG, "first RTU control detected — starting RTU driver");
+    return kx_modbus_master_start();
+}

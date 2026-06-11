@@ -4,8 +4,8 @@
 #include "kx_config_handler.h"
 #include "kx_telemetry.h"
 #include "kx_modbus_master.h"
+#include "kx_modbus_tcp.h"
 #include "kx_param_store.h"
-#include "kx_supervision.h"
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -19,19 +19,18 @@
 #include <string.h>
 #include <float.h>
 
-
 static const char *TAG = "main";
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
-
-// Tiempo mínimo (ms) entre lecturas Modbus reales para un mismo param_id.
 #define KX_GET_CACHE_TTL_MS  10000
 
 static EventGroupHandle_t s_wifi_events;
 static int s_wifi_retry = 0;
 
-// ── NTP ───────────────────────────────────────────────────────
+// =============================================================
+// NTP
+// =============================================================
 static void _ntp_init(void)
 {
     esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("216.239.35.0");
@@ -39,30 +38,22 @@ static void _ntp_init(void)
 
     ESP_LOGI(TAG, "Waiting for NTP sync...");
     int retry = 0;
-    const int max_retry = 20;
-
-    while (retry < max_retry) {
-        if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(2000)) == ESP_OK) {
-            break;
-        }
+    while (retry < 20) {
+        if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(2000)) == ESP_OK) break;
         retry++;
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        ESP_LOGI(TAG, "NTP sync pending... (%d/%d) epoch=%ld",
-                 retry, max_retry, tv.tv_sec);
+        struct timeval tv; gettimeofday(&tv, NULL);
+        ESP_LOGI(TAG, "NTP sync pending... (%d/20) epoch=%ld", retry, tv.tv_sec);
     }
-
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-
-    if (tv.tv_sec < 1700000000) {
-        ESP_LOGE(TAG, "NTP FAILED — epoch=%ld — timestamps will be wrong", tv.tv_sec);
-    } else {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    if (tv.tv_sec < 1700000000)
+        ESP_LOGE(TAG, "NTP FAILED — epoch=%ld", tv.tv_sec);
+    else
         ESP_LOGI(TAG, "NTP sync OK — epoch=%ld", tv.tv_sec);
-    }
 }
 
-// ── WiFi event handler ────────────────────────────────────────
+// =============================================================
+// WiFi
+// =============================================================
 static void _wifi_event_handler(void *arg, esp_event_base_t base,
                                 int32_t id, void *data)
 {
@@ -70,7 +61,6 @@ static void _wifi_event_handler(void *arg, esp_event_base_t base,
         if (id == WIFI_EVENT_STA_START) {
             esp_wifi_connect();
             kx_system_set_net_state(KX_NET_CONNECTING);
-
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             kx_system_set_net_state(KX_NET_DISCONNECTED);
             if (s_wifi_retry < KX_WIFI_MAX_RETRY) {
@@ -90,11 +80,9 @@ static void _wifi_event_handler(void *arg, esp_event_base_t base,
     }
 }
 
-// ── WiFi init ─────────────────────────────────────────────────
 static esp_err_t _wifi_init_sta(void)
 {
     s_wifi_events = xEventGroupCreate();
-
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     esp_netif_create_default_wifi_sta();
@@ -118,21 +106,18 @@ static esp_err_t _wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "connecting to: %s", KX_WIFI_SSID);
-
     EventBits_t bits = xEventGroupWaitBits(
-        s_wifi_events,
-        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-        pdFALSE, pdFALSE,
-        pdMS_TO_TICKS(30000)
-    );
+        s_wifi_events, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        pdFALSE, pdFALSE, pdMS_TO_TICKS(30000));
 
     if (bits & WIFI_CONNECTED_BIT) return ESP_OK;
-
     ESP_LOGE(TAG, "WiFi failed");
     return ESP_FAIL;
 }
 
-// ── Helpers de topic ──────────────────────────────────────────
+// =============================================================
+// Helpers de topic
+// =============================================================
 static inline bool _is_quiiot_entities_topic(const char *topic)
 {
     return (strncmp(topic, "quiiot/", 7) == 0 &&
@@ -141,90 +126,79 @@ static inline bool _is_quiiot_entities_topic(const char *topic)
 
 static bool _topic_last_segment_ends_with_set(const char *topic)
 {
-    const char *last_slash = strrchr(topic, '/');
-    if (!last_slash) return false;
-    return strcmp(last_slash + 1, "set") == 0;
+    const char *last = strrchr(topic, '/');
+    return last && strcmp(last + 1, "set") == 0;
 }
 
-// ── Extrae el param_id del payload de entities/get ───────────
 static int _parse_get_param_id(const char *payload, size_t len)
 {
     if (!payload || len == 0) return 0;
-
     cJSON *root = cJSON_ParseWithLength(payload, len);
-    if (!root) {
-        ESP_LOGW(TAG, "get payload: JSON parse failed (%.40s)", payload);
-        return 0;
-    }
-
+    if (!root) return 0;
     cJSON *obj = cJSON_IsArray(root) ? cJSON_GetArrayItem(root, 0) : root;
-
     int param_id = 0;
     if (obj) {
         cJSON *id_item = cJSON_GetObjectItem(obj, "id");
-        if (id_item && cJSON_IsNumber(id_item)) {
+        if (id_item && cJSON_IsNumber(id_item))
             param_id = id_item->valueint;
-        } else {
-            ESP_LOGW(TAG, "get payload: no numeric 'id' field in: %.60s", payload);
-        }
     }
-
     cJSON_Delete(root);
     return param_id;
 }
 
 // =============================================================
-// Contexto para búsqueda del control_id de un param_id dado.
+// Enrutamiento RTU / TCP
+//
+// Busca el control_id del param y consulta su protocolo.
+// Devuelve true si el control es TCP, false si es RTU.
 // =============================================================
-typedef struct {
-    int  target_param_id;
-    int  found_ctrl_id;
-} _cache_find_ctx_t;
+typedef struct { int target; int ctrl_id; } _route_ctx_t;
 
-static void _cache_find_ctrl_cb(int ctrl_id, const kx_param_t *param, void *ud)
+static void _route_find_cb(int ctrl_id, const kx_param_t *p, void *ud)
 {
-    _cache_find_ctx_t *ctx = (_cache_find_ctx_t *)ud;
-    if (ctx->found_ctrl_id < 0 && param->param_id == ctx->target_param_id) {
-        ctx->found_ctrl_id = ctrl_id;
-    }
+    _route_ctx_t *ctx = (_route_ctx_t *)ud;
+    if (ctx->ctrl_id < 0 && p->param_id == ctx->target)
+        ctx->ctrl_id = ctrl_id;
+}
+
+static bool _param_is_tcp(int param_id)
+{
+    if (param_id == 0) return false;   // ciclo completo: decide main loop
+    _route_ctx_t ctx = { .target = param_id, .ctrl_id = -1 };
+    kx_param_store_foreach(_route_find_cb, &ctx);
+    if (ctx.ctrl_id < 0) return false;
+    return kx_param_store_get_proto(ctx.ctrl_id) == KX_PROTO_TCP;
 }
 
 // =============================================================
-// _try_serve_from_cache
+// Caché de lecturas recientes
 // =============================================================
+typedef struct { int target; int ctrl_id; } _cache_find_ctx_t;
+
+static void _cache_find_ctrl_cb(int ctrl_id, const kx_param_t *p, void *ud)
+{
+    _cache_find_ctx_t *ctx = (_cache_find_ctx_t *)ud;
+    if (ctx->ctrl_id < 0 && p->param_id == ctx->target)
+        ctx->ctrl_id = ctrl_id;
+}
+
 static bool _try_serve_from_cache(int param_id)
 {
     if (param_id == 0) return false;
 
-    _cache_find_ctx_t ctx = {
-        .target_param_id = param_id,
-        .found_ctrl_id   = -1,
-    };
+    _cache_find_ctx_t ctx = { .target = param_id, .ctrl_id = -1 };
     kx_param_store_foreach(_cache_find_ctrl_cb, &ctx);
+    if (ctx.ctrl_id < 0) return false;
 
-    if (ctx.found_ctrl_id < 0) {
-        ESP_LOGD(TAG, "cache: param_id=%d not found in store", param_id);
-        return false;
-    }
-
-    const kx_param_t *p = kx_param_store_get_param(ctx.found_ctrl_id, param_id);
+    const kx_param_t *p = kx_param_store_get_param(ctx.ctrl_id, param_id);
     if (!p) return false;
-
-    if (p->ts_last_read == 0 || p->last_published_value == FLT_MAX) {
-        ESP_LOGD(TAG, "cache MISS param_id=%d (never read)", param_id);
-        return false;
-    }
+    if (p->ts_last_read == 0 || p->last_published_value == FLT_MAX) return false;
 
     int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
     int64_t age_ms = now_ms - p->ts_last_read;
+    if (age_ms >= KX_GET_CACHE_TTL_MS) return false;
 
-    if (age_ms >= KX_GET_CACHE_TTL_MS) {
-        ESP_LOGD(TAG, "cache EXPIRED param_id=%d age=%" PRId64 "ms (ttl=%d ms)",
-                 param_id, age_ms, KX_GET_CACHE_TTL_MS);
-        return false;
-    }
-
-    kx_param_pub_status(ctx.found_ctrl_id, param_id, p->last_published_value);
+    kx_param_pub_status(ctx.ctrl_id, param_id, p->last_published_value);
     return true;
 }
 
@@ -236,27 +210,32 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
     if (!_is_quiiot_entities_topic(topic)) {
         ESP_LOGI(TAG, "RX topic=%s | len=%zu | heap=%" PRIu32,
                 topic, len, kx_system_heap_free());
-    } else {
-        ESP_LOGD(TAG, "RX topic=%s | len=%zu", topic, len);
     }
     ESP_LOGD(TAG, "payload: %.*s", (int)len, payload);
 
     if (_is_quiiot_entities_topic(topic)) {
 
         if (_topic_last_segment_ends_with_set(topic)) {
+            // Escritura — enrutar al driver correcto
+            // kx_param_handle_set ya llama kx_modbus_enqueue_write,
+            // que es RTU. Para TCP necesitamos interceptar aquí.
+            // Solución: kx_param_handle_set detecta el proto internamente.
             kx_param_handle_set(topic, payload, len);
+            return;
+        }
 
-        } else {
-            const char *last_slash = strrchr(topic, '/');
-            if (last_slash && strcmp(last_slash + 1, "get") == 0) {
-                int param_id = _parse_get_param_id(payload, len);
-                ESP_LOGD(TAG, "entities/get param_id=%d", param_id);
+        const char *last = strrchr(topic, '/');
+        if (last && strcmp(last + 1, "get") == 0) {
+            int param_id = _parse_get_param_id(payload, len);
+            ESP_LOGD(TAG, "entities/get param_id=%d", param_id);
 
-                if (!_try_serve_from_cache(param_id)) {
+            if (!_try_serve_from_cache(param_id)) {
+                // Enrutar según protocolo del control
+                if (_param_is_tcp(param_id)) {
+                    kx_modbus_tcp_request_poll(param_id);
+                } else {
                     kx_modbus_request_poll(param_id);
                 }
-            } else {
-                ESP_LOGD(TAG, "entities topic ignorado: %s", topic);
             }
         }
         return;
@@ -275,32 +254,29 @@ static void _on_mqtt_message(const char *topic, const char *payload, size_t len)
     ESP_LOGW(TAG, "unhandled topic: %s", topic);
 }
 
-// ── Intentar cargar controles desde NVS ──────────────────────
+// =============================================================
+// NVS cache
+// =============================================================
 static bool _try_load_from_nvs(void)
 {
     kx_param_store_init();
-
     if (!kx_param_store_nvs_valid()) {
-        ESP_LOGI(TAG, "NVS cache: miss (magic/uuid mismatch or empty)");
+        ESP_LOGI(TAG, "NVS cache: miss");
         return false;
     }
-
-    ESP_LOGI(TAG, "NVS cache: HIT — loading controls + entities...");
+    ESP_LOGI(TAG, "NVS cache: HIT — loading...");
     esp_err_t err = kx_param_store_load_nvs();
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "NVS load failed (%s), will download via MQTT",
-                 esp_err_to_name(err));
+        ESP_LOGW(TAG, "NVS load failed (%s)", esp_err_to_name(err));
         kx_param_store_clear_nvs();
         return false;
     }
-
     int count = kx_param_store_count();
     ESP_LOGI(TAG, "NVS cache: loaded %d controls", count);
     kx_param_store_set_expected(count);
     return true;
 }
 
-// ── Banner de arranque ────────────────────────────────────────
 static void _print_boot_banner(bool from_cache)
 {
     ESP_LOGI(TAG, "╔══════════════════════════════════════╗");
@@ -309,17 +285,19 @@ static void _print_boot_banner(bool from_cache)
     ESP_LOGI(TAG, "║  Cache: %-28s ║",
              from_cache ? "controls+entities from NVS" : "will download via MQTT");
     ESP_LOGI(TAG, "║  Get TTL: %-26dms ║", KX_GET_CACHE_TTL_MS);
-    ESP_LOGI(TAG, "║  Protocol: Modbus RTU               ║");
+    ESP_LOGI(TAG, "║  Protocol: Modbus RTU + TCP         ║");
     ESP_LOGI(TAG, "╚══════════════════════════════════════╝");
 }
 
-// ── app_main ──────────────────────────────────────────────────
+// =============================================================
+// app_main
+// =============================================================
 void app_main(void)
 {
     // 1. Sistema base
     ESP_ERROR_CHECK(kx_system_init());
 
-    // 2. Caché NVS
+    // 2. NVS cache
     bool from_cache = _try_load_from_nvs();
     _print_boot_banner(from_cache);
 
@@ -339,23 +317,31 @@ void app_main(void)
     // 6. Telemetría
     ESP_ERROR_CHECK(kx_telemetry_start());
 
-    // 7. Modbus RTU
-    ESP_ERROR_CHECK(kx_modbus_master_start());
+    // 7. Drivers Modbus RTU y TCP
+    // NO se arrancan aquí. kx_config_handler los arranca
+    // automáticamente en cuanto recibe el controls.json y
+    // confirma qué protocolo usa cada control.
+    // Esto evita reservar colas y stacks para un driver
+    // que quizás no tenga ningún control asignado.
+    //
+    // Si hay caché NVS válida con controles RTU o TCP,
+    // los drivers arrancan al procesar el controls.json
+    // tras la reconexión MQTT, no antes.
 
-    // 8. Supervisión y watchdog
-    ESP_ERROR_CHECK(kx_supervision_start());
-
-    ESP_LOGI(TAG, "init done — device_id=%s fw=%s cache=%s get_ttl=%dms",
+    ESP_LOGI(TAG, "init done — device_id=%s fw=%s cache=%s",
              kx_system_device_id(), KX_FW_VERSION,
-             from_cache ? "yes" : "no",
-             KX_GET_CACHE_TTL_MS);
+             from_cache ? "yes" : "no");
 
+    // Loop de diagnóstico
     while (1) {
-        ESP_LOGI(TAG, "heap=%lu mqtt=%s modbus=%s controls=%d",
+        ESP_LOGI(TAG,
+                 "heap=%lu mqtt=%s rtu=%s tcp=%s controls=%d",
                  (unsigned long)kx_system_heap_free(),
-                 kx_mqtt_is_connected()        ? "connected"    : "disconnected",
-                 kx_modbus_master_is_running()  ? "running"      : "stopped",
+                 kx_mqtt_is_connected()        ? "connected" : "disconnected",
+                 kx_modbus_master_is_running() ? "running"   : "not started",
+                 kx_modbus_tcp_is_running()    ? "running"   : "not started",
                  kx_param_store_count());
+
         vTaskDelay(pdMS_TO_TICKS(10000));
     }
 }
