@@ -1,5 +1,5 @@
 #include "kx_modbus_uart.h"
-#include "../../main/kx_config.h"
+#include "../../../main/kx_config.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
@@ -10,7 +10,12 @@
 
 static const char *TAG = "kx_modbus_uart";
 
-// ── Defaults si no vienen de kx_config.h ─────────────────────
+// =============================================================
+// kx_modbus_uart.c — Capa de transporte Modbus RTU
+//
+// Sin cambios respecto a la versión original.
+// =============================================================
+
 #ifndef KX_MODBUS_UART_NUM
 #define KX_MODBUS_UART_NUM   UART_NUM_1
 #endif

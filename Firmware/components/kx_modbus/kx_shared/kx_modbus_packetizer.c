@@ -7,7 +7,7 @@
 #include <float.h>
 #include <inttypes.h>
 
-#include "../../main/kx_config.h"
+#include "../../../main/kx_config.h"
 
 static const char *TAG = "kx_pkt";
 
@@ -41,8 +41,7 @@ typedef struct {
     _candidate_t   *arr;
     int             count;
     int             capacity;
-    bool            full;        // true cuando realloc falló — no escribir más
-    // filtros
+    bool            full;
     bool            demand_active;
     const int      *param_ids;
     int             n_param_ids;
@@ -73,17 +72,12 @@ static inline bool _in_set(const int *ids, int n, int param_id)
 
 // =============================================================
 // Callback de recopilación
-// FIX: cuando realloc falla, se marca ctx->full=true y se deja
-//      de escribir. Sin el fix, se escribía más allá del buffer
-//      original corrompiendo el heap (StoreProhibited panic).
 // =============================================================
 static void _collect_cb(int ctrl_id, const kx_param_t *param, void *ud)
 {
     _collect_ctx_t *ctx = (_collect_ctx_t *)ud;
 
-    // Si ya marcamos el array como lleno definitivamente, no escribir más
     if (ctx->full) return;
-
     if (ctrl_id != ctx->control_id) return;
 
     uint8_t fc = (uint8_t)param->function_read;
@@ -100,13 +94,11 @@ static void _collect_cb(int ctrl_id, const kx_param_t *param, void *ud)
         if (ctx->tick_s % (int64_t)param->sampling != 0) return;
     }
 
-    // Crecer el array si hace falta
     if (ctx->count >= ctx->capacity) {
         int new_cap = ctx->capacity * 2;
         _candidate_t *tmp = realloc(ctx->arr,
                                     (size_t)new_cap * sizeof(_candidate_t));
         if (!tmp) {
-            // FIX: marcar como lleno — nunca escribir fuera del buffer original
             ESP_LOGW(TAG, "collect_cb: realloc failed at count=%d — capping",
                      ctx->count);
             ctx->full = true;
@@ -116,11 +108,7 @@ static void _collect_cb(int ctrl_id, const kx_param_t *param, void *ud)
         ctx->capacity = new_cap;
     }
 
-    // Guardia adicional de seguridad
-    if (ctx->count >= ctx->capacity) {
-        ctx->full = true;
-        return;
-    }
+    if (ctx->count >= ctx->capacity) { ctx->full = true; return; }
 
     ctx->arr[ctx->count++] = (_candidate_t){
         .control_id = ctrl_id,
@@ -159,6 +147,11 @@ static bool _list_ensure(kx_packet_list_t *list)
 
 // =============================================================
 // _flush_group
+//
+// FIX: si el rango tiene huecos (registros no presentes en el
+// grupo), emite packets individuales por cada candidato en vez
+// de un multi con gaps — evita excepciones Modbus en esclavos
+// que no toleran leer registros inexistentes.
 // =============================================================
 static void _flush_group(kx_packet_list_t *list,
                          uint8_t slave_addr,
@@ -178,26 +171,24 @@ static void _flush_group(kx_packet_list_t *list,
         while (g_end + 1 < n_group && group[g_end + 1].reg <= win_end)
             g_end++;
 
-        // ── Contar gaps en el rango ───────────────────────────
-        // Si el rango tiene huecos (registros entre win_start y
-        // group[g_end].reg que no aparecen en el grupo), partir
-        // en packets individuales para no leer registros inexistentes.
+        // ── Detectar gaps ─────────────────────────────────────
         int n_in_window = g_end - g_start + 1;
         int reg_span    = (int)group[g_end].reg - (int)group[g_start].reg + 1;
         bool has_gaps   = (reg_span > n_in_window);
 
         if (has_gaps) {
-            // Emitir un packet individual por cada candidato del grupo
+            // Emitir un packet individual por cada candidato —
+            // nunca leer registros que no son params reales.
             for (int k = g_start; k <= g_end; k++) {
                 if (!_list_ensure(list)) return;
                 kx_packet_t *pkt = &list->pkts[list->count];
                 memset(pkt, 0, sizeof(*pkt));
 
-                pkt->slave_addr = slave_addr;
-                pkt->fc         = fc;
-                pkt->start_reg  = group[k].reg;
-                pkt->num_regs   = 1;
-                pkt->num_slots  = 1;
+                pkt->slave_addr  = slave_addr;
+                pkt->fc          = fc;
+                pkt->start_reg   = group[k].reg;
+                pkt->num_regs    = 1;
+                pkt->num_slots   = 1;
 
                 kx_pkt_slot_t *slot = &pkt->slots[0];
                 slot->control_id = group[k].control_id;
@@ -207,15 +198,15 @@ static void _flush_group(kx_packet_list_t *list,
 
                 list->count++;
 
-                ESP_LOGD(TAG, "packet[%d]: slave=%d fc=0x%02x reg=0x%04x "
-                         "num_regs=1 slots=1 (individual/no-gap)",
+                ESP_LOGD(TAG, "packet[%d]: slave=%d fc=0x%02x "
+                         "reg=0x%04x num_regs=1 (individual/gap-split)",
                          list->count - 1, slave_addr, fc, group[k].reg);
             }
             g_start = g_end + 1;
             continue;
         }
 
-        // Sin gaps — packet multi normal
+        // ── Sin gaps: packet multi normal ─────────────────────
         if (!_list_ensure(list)) return;
         kx_packet_t *pkt = &list->pkts[list->count];
         memset(pkt, 0, sizeof(*pkt));
@@ -273,7 +264,6 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
                                 int64_t        tick_s,
                                 int64_t        now_ms)
 {
-    // Metadatos del control (slave_addr)
     const kx_control_t *ctrl_info = kx_param_store_get_ctrl(control_id);
     if (!ctrl_info || ctrl_info->slave_addr == 0) {
         ESP_LOGW(TAG, "build: ctrl=%d not found or no slave_addr", control_id);
@@ -281,7 +271,6 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
     }
     uint8_t slave_addr = (uint8_t)ctrl_info->slave_addr;
 
-    // Capacidad inicial del array de candidatos
     int init_cap = (n_param_ids > 0) ? n_param_ids + 4 : 64;
     _candidate_t *arr = _palloc((size_t)init_cap * sizeof(_candidate_t));
     if (!arr) { ESP_LOGE(TAG, "build: OOM candidates"); return NULL; }
@@ -290,7 +279,7 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
         .arr           = arr,
         .count         = 0,
         .capacity      = init_cap,
-        .full          = false,      // FIX: inicializar bandera
+        .full          = false,
         .demand_active = demand_active,
         .param_ids     = param_ids,
         .n_param_ids   = n_param_ids,
@@ -301,8 +290,8 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
     kx_param_store_foreach(_collect_cb, &ctx);
 
     if (ctx.full) {
-        ESP_LOGW(TAG, "build: ctrl=%d candidate array was capped at %d "
-                 "(realloc OOM)", control_id, ctx.count);
+        ESP_LOGW(TAG, "build: ctrl=%d candidate array capped at %d",
+                 control_id, ctx.count);
     }
 
     if (ctx.count == 0) {
@@ -313,10 +302,8 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
         return NULL;
     }
 
-    // Ordenar por (fc, reg)
     qsort(ctx.arr, (size_t)ctx.count, sizeof(_candidate_t), _cmp_candidate);
 
-    // Crear lista de salida
     kx_packet_list_t *list = _palloc(sizeof(kx_packet_list_t));
     if (!list) { free(ctx.arr); return NULL; }
 
@@ -326,7 +313,6 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
     list->count    = 0;
     list->capacity = init_pkt_cap;
 
-    // Buffer temporal para el grupo actual
     _candidate_t *group = malloc((size_t)KX_PKT_MAX_REGS_PER_PKT *
                                   sizeof(_candidate_t));
     if (!group) {
@@ -357,11 +343,9 @@ kx_packet_list_t *kx_pkt_build(int            control_id,
             n_group = 0;
         }
 
-        // Guardia: no desbordar el buffer temporal del grupo
         if (n_group < KX_PKT_MAX_REGS_PER_PKT) {
             group[n_group++] = *cur;
         } else {
-            // Caso extremo: forzar flush y empezar nuevo grupo
             _flush_group(list, slave_addr, group[0].fc, group, n_group);
             n_group = 0;
             group[n_group++] = *cur;
@@ -417,7 +401,7 @@ int kx_pkt_real_param_count(const kx_packet_list_t *list)
 }
 
 // =============================================================
-// kx_pkt_dump
+// kx_pkt_dump  (solo en log level VERBOSE)
 // =============================================================
 void kx_pkt_dump(const kx_packet_list_t *list, const char *tag)
 {
@@ -443,8 +427,7 @@ void kx_pkt_dump(const kx_packet_list_t *list, const char *tag)
             for (int s = 0; s < pkt->num_slots; s++) {
                 const kx_pkt_slot_t *sl = &pkt->slots[s];
                 if (sl->is_gap)
-                    ESP_LOGD(tag, "       slot[%d] reg=0x%04x GAP",
-                             s, sl->reg);
+                    ESP_LOGD(tag, "       slot[%d] reg=0x%04x GAP", s, sl->reg);
                 else
                     ESP_LOGD(tag, "       slot[%d] reg=0x%04x param_id=%d",
                              s, sl->reg, sl->param_id);

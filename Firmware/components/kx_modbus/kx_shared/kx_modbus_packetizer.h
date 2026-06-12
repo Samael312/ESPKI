@@ -4,26 +4,24 @@
 #include <stdbool.h>
 
 // =============================================================
-// kx_modbus_packetizer.h  —  Agrupador de registros Modbus
+// kx_modbus_packetizer.h — Agrupador de registros Modbus
+//                          (compartido entre RTU y TCP)
 //
 // Tres modos de construcción (kx_pkt_build):
 //
 //   MODO DEMAND-FULL  (demand_active=true,  param_ids=NULL)
 //     Incluye todos los params visibles con fc_read válido.
-//     Usado en ciclo completo (param_id==0 en la cola).
 //
 //   MODO DEMAND-SET   (demand_active=true,  param_ids!=NULL)
 //     Incluye solo los param_ids del array dado.
-//     Usado en batch de demandas individuales: agrupa los
-//     registros consecutivos del set en un solo packet.
 //
 //   MODO REPORT       (demand_active=false, param_ids=NULL)
 //     Filtra por tick_s % param->sampling == 0.
-//     Usado en la tarea de reports periódicos.
 //
-// KX_PKT_MAX_GAP controla cuántos huecos se toleran al agrupar.
-// KX_PKT_MAX_REGS_PER_PKT es el límite físico del protocolo
-// (125 holding/input regs por trama Modbus RTU).
+// KX_PKT_MAX_GAP controla cuántos huecos se toleran al agrupar
+// dentro de la ventana — pero si el resultado tiene gaps,
+// _flush_group ahora emite packets individuales en su lugar
+// (ver kx_modbus_packetizer.c, fix de excepciones Modbus).
 // =============================================================
 
 #define KX_PKT_MAX_REGS_PER_PKT   3
