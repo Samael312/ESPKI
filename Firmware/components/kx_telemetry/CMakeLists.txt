@@ -6,7 +6,6 @@ idf_component_register(
         kx_mqtt
         kx_param_store
         kx_modbus
-        kx_modbus_tcp
         esp_wifi
         esp_timer
         freertos

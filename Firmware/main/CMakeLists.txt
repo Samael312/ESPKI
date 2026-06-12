@@ -7,7 +7,6 @@ idf_component_register(
         kx_config
         kx_telemetry
         kx_modbus
-        kx_modbus_tcp
         kx_param_store
         nvs_flash
         esp_wifi
