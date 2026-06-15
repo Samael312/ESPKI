@@ -248,4 +248,4 @@ static inline const kx_control_params_t *kx_param_store_get(int control_id)
 void kx_param_pub_error(int control_id, int param_id,
                          const char *msg, uint16_t reg);
 
-void kx_param_store_print_active_samplings(void);
+//void kx_param_store_print_active_samplings(void);

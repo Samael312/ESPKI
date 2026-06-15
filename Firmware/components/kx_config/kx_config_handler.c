@@ -246,7 +246,7 @@ void kx_config_handle(const char *topic, const char *payload, size_t len)
                 esp_err_t nvs_err = kx_param_store_save_nvs();
                 if (nvs_err == ESP_OK) {
                     ESP_LOGI(TAG, "NVS save OK");
-                    kx_param_store_print_active_samplings();
+                    //kx_param_store_print_active_samplings();
                 } else {
                     ESP_LOGW(TAG, "NVS save failed: %s", esp_err_to_name(nvs_err));
                 }

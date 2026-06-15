@@ -184,7 +184,7 @@ void kx_config_process_single_control(cJSON *ctrl_json, int hint_control_id)
     } else {
         ESP_LOGI(TAG, "ctrl=%d: ts up-to-date (%.3f) → using cached",
                  control_id, ts_stored);
-        kx_param_store_print_active_samplings();
+        //kx_param_store_print_active_samplings();
     }
 
     if (need_discovery) {

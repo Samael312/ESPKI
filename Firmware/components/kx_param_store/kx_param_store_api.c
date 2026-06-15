@@ -459,19 +459,19 @@ esp_err_t kx_param_store_get_tcp_endpoint(int      control_id,
 // =============================================================
 // Diagnóstico
 // =============================================================
-static void _print_active_sampling_cb(int ctrl_id, const kx_param_t *param, void *ud)
-{
-    (void)ud;
-    if (param->sampling > 0)
-        ESP_LOGI("STORE_DEBUG",
-                 "ctrl=%d param=%d reg=0x%04x sampling=%ds name=%s",
-                 ctrl_id, param->param_id, param->reg,
-                 param->sampling, param->name);
-}
+//static void _print_active_sampling_cb(int ctrl_id, const kx_param_t *param, void *ud)
+//{
+//    (void)ud;
+//    if (param->sampling > 0)
+//        ESP_LOGI("STORE_DEBUG",
+//                 "ctrl=%d param=%d reg=0x%04x sampling=%ds name=%s",
+//                 ctrl_id, param->param_id, param->reg,
+//                 param->sampling, param->name);
+//}
 
-void kx_param_store_print_active_samplings(void)
-{
-    ESP_LOGI("STORE_DEBUG", "=== PARAMS CON SAMPLING > 0 ===");
-    kx_param_store_foreach(_print_active_sampling_cb, NULL);
-    ESP_LOGI("STORE_DEBUG", "===============================");
-}
+//void kx_param_store_print_active_samplings(void)
+//{
+//    ESP_LOGI("STORE_DEBUG", "=== PARAMS CON SAMPLING > 0 ===");
+//    kx_param_store_foreach(_print_active_sampling_cb, NULL);
+//    ESP_LOGI("STORE_DEBUG", "===============================");
+//}
