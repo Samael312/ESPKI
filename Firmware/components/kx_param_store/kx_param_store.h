@@ -6,6 +6,14 @@
 
 // =============================================================
 // kx_param_store.h — Almacén con hash de TRES niveles
+//
+// Implementación dividida en 3 archivos:
+//   kx_param_store_hash.c — niveles 1+2+3 (operaciones internas)
+//   kx_param_store_nvs.c  — persistencia NVS
+//   kx_param_store_api.c  — API pública, parseo, foreach
+//
+// Esta cabecera es la API pública — sin cambios respecto a
+// la versión original (monolítica).
 // =============================================================
 
 // ── Límites y dimensiones ─────────────────────────────────────
@@ -96,7 +104,6 @@ typedef struct {
 // =============================================================
 // NIVEL 1 — Control
 //
-// Nuevos campos respecto a la versión RTU-only:
 //   proto      — KX_PROTO_RTU o KX_PROTO_TCP
 //   tcp_ip     — IP del esclavo TCP  (ej. "172.17.123.250")
 //   tcp_port   — Puerto TCP          (ej. 502)
@@ -113,9 +120,9 @@ typedef struct {
     bool             entities_ready;
 
     // ── Transporte ────────────────────────────────────────────
-    kx_proto_t       proto;                  // KX_PROTO_RTU | KX_PROTO_TCP
-    char             tcp_ip[KX_TCP_IP_LEN];  // "" si proto==RTU
-    uint16_t         tcp_port;               // 0  si proto==RTU
+    kx_proto_t       proto;
+    char             tcp_ip[KX_TCP_IP_LEN];
+    uint16_t         tcp_port;
 } kx_control_t;
 
 typedef struct kx_ctrl_node {
@@ -205,7 +212,7 @@ esp_err_t kx_param_store_set_ts_set(int control_id, int param_id, double ts);
 // =============================================================
 // API pública — Transporte TCP
 //
-// Llámadas desde kx_config_handler tras parsear el controls.json.
+// Llamadas desde kx_config_handler tras parsear el controls.json.
 // Si proto == KX_PROTO_RTU, tcp_ip queda vacío y tcp_port = 0.
 // =============================================================
 

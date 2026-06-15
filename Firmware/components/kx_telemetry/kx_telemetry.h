@@ -3,6 +3,15 @@
 #include <stdint.h>
 #include <stddef.h>
 
+// =============================================================
+// kx_telemetry.h — API pública
+//
+// Implementación dividida en 3 archivos:
+//   kx_telemetry.c     — tarea alive log
+//   kx_telemetry_pub.c — publicaciones status/report/error/control_status
+//   kx_telemetry_set.c — kx_param_handle_set (router de escrituras)
+// =============================================================
+
 esp_err_t kx_telemetry_start(void);
 
 // ── Publicaciones salientes (device → broker) ────────────────

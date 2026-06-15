@@ -18,6 +18,14 @@
 
 static const char *TAG = "kx_mqtt";
 
+// =============================================================
+// kx_mqtt.c — Cliente MQTT con reconexión automática y LWT
+//
+// LIMPIEZA: se eliminaron _track_control_from_topic() y
+// _log_controls_list() — acumulaban nombres de controles en un
+// array que nunca se consultaba (dead code).
+// =============================================================
+
 // ── Estado interno ────────────────────────────────────────────
 static esp_mqtt_client_handle_t s_client    = NULL;
 static kx_mqtt_msg_cb_t         s_msg_cb    = NULL;
@@ -40,12 +48,6 @@ typedef struct {
     size_t len;
 } kx_msg_t;
 
-// ── Lista de controles detectados ─────────────────────────────
-#define KX_MAX_CONTROLS 100
-
-static char s_control_names[KX_MAX_CONTROLS][64];
-static int  s_control_count  = 0;
-
 // ── Defines de cola y backpressure ────────────────────────────
 #define QUEUE_BASE_SIZE              128
 #define QUEUE_PER_CONTROL            20
@@ -53,10 +55,6 @@ static int  s_control_count  = 0;
 #define KX_QUEUE_BACKPRESSURE_HEAP   (256 * 1024)  // bajado de 512KB
 
 static QueueHandle_t s_msg_queue = NULL;
-
-// ── Forward declarations ──────────────────────────────────────
-static void _track_control_from_topic(const char *topic);
-static void _log_controls_list(void);
 
 static double _ts(void)
 {
@@ -118,51 +116,6 @@ void kx_mqtt_resize_queue(int num_controls)
              new_size, migrated, dropped);
 }
 
-// ── Extrae el nombre del control del topic y lo acumula ───────
-static void _track_control_from_topic(const char *topic)
-{
-    const char *marker = strstr(topic, "/controls/");
-    if (!marker) return;
-
-    const char *control_start = marker + strlen("/controls/");
-    const char *slash = strchr(control_start, '/');
-    size_t name_len = slash ? (size_t)(slash - control_start)
-                            : strlen(control_start);
-
-    if (name_len == 0 || name_len >= sizeof(s_control_names[0])) return;
-
-    for (int i = 0; i < s_control_count; i++) {
-        if (strncmp(s_control_names[i], control_start, name_len) == 0
-            && s_control_names[i][name_len] == '\0') {
-            return;
-        }
-    }
-
-    if (s_control_count >= KX_MAX_CONTROLS) {
-        ESP_LOGW(TAG, "control list full (%d), ignoring: %.*s",
-                 KX_MAX_CONTROLS, (int)name_len, control_start);
-        return;
-    }
-
-    strncpy(s_control_names[s_control_count], control_start, name_len);
-    s_control_names[s_control_count][name_len] = '\0';
-    s_control_count++;
-
-    ESP_LOGI(TAG, "control detected [%d]: %s",
-             s_control_count, s_control_names[s_control_count - 1]);
-}
-
-// ── Imprime la lista completa de controles detectados ─────────
-static void _log_controls_list(void)
-{
-    ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    ESP_LOGI(TAG, "CONTROLS DETECTED (%d total):", s_control_count);
-    for (int i = 0; i < s_control_count; i++) {
-        ESP_LOGI(TAG, "  [%02d] %s", i + 1, s_control_names[i]);
-    }
-    ESP_LOGI(TAG, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-}
-
 // ── Tarea de procesamiento — prioridad 6 ─────────────────────
 static void _processing_task(void *arg)
 {
@@ -179,13 +132,6 @@ static void _processing_task(void *arg)
 
             if (s_msg_cb) {
                 s_msg_cb(msg.topic, msg.payload, msg.len);
-            }
-
-            _track_control_from_topic(msg.topic);
-
-            const char *entities_suffix = strstr(msg.topic, "/entities");
-            if (entities_suffix && strcmp(entities_suffix, "/entities") == 0) {
-                _log_controls_list();
             }
 
             free(msg.topic);

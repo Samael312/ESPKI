@@ -1,5 +1,8 @@
 idf_component_register(
-    SRCS "kx_telemetry.c"
+    SRCS
+        "kx_telemetry.c"
+        "kx_telemetry_pub.c"
+        "kx_telemetry_set.c"
     INCLUDE_DIRS "."
     REQUIRES
         kx_system

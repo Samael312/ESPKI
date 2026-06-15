@@ -1,5 +1,7 @@
 idf_component_register(
-    SRCS "kx_config_handler.c"
+    SRCS
+        "kx_config_handler.c"
+        "kx_config_protocol.c"
     INCLUDE_DIRS "."
     REQUIRES
         kx_system

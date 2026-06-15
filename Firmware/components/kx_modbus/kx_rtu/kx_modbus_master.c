@@ -27,7 +27,7 @@ static const char *TAG = "kx_modbus";
 
 // ── Tamaños de cola ───────────────────────────────────────────
 #define PUB_QUEUE_SIZE     500
-#define DEMAND_QUEUE_SIZE  1500
+#define DEMAND_QUEUE_SIZE  2500
 #define WRITE_QUEUE_SIZE    64
 
 // ── Bits de evento ────────────────────────────────────────────

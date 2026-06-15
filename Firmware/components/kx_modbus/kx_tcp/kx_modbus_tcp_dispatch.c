@@ -70,8 +70,8 @@ int kx_dispatch_packet_tcp(QueueHandle_t      pub_queue,
         int64_t ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
 
         if (rx < 0) {
-            ESP_LOGW(TAG, "multi FAILED — fallback unit=%u reg=0x%04x num=%d",
-                     unit_id, pkt->start_reg, pkt->num_regs);
+            // ESP_LOGW(TAG, "multi FAILED — fallback unit=%u reg=0x%04x num=%d",
+            //         unit_id, pkt->start_reg, pkt->num_regs);
             for (int s = 0; s < pkt->num_slots; s++) {
                 const kx_pkt_slot_t *sl = &pkt->slots[s];
                 if (sl->is_gap || sl->param_id < 0) continue;
