@@ -350,3 +350,7 @@ Definidas en `kx_config.h` (timing de tareas) y en los headers de cada módulo:
 | `KX_PKT_MAX_GAP` | 0 | Huecos tolerados al agrupar |
 | `KX_DEMAND_TIMEOUT_S` | 10 | TTL de demanda en cola |
 | `KX_MAX_TCP_SOCKETS` | 4 | Conexiones TCP simultáneas |
+
+## Nota
+
+Los "errors" en REPORT RTU Ticks son falsos o se presumen falsos, cuando se manda un report de un parametro que comparte registro con otro, el segundo se presenta en "errors" sin embargo se envia correctamente a plataforma
