@@ -73,6 +73,17 @@ static void _sock_close(int idx)
     }
 }
 
+void kx_tcp_sock_set_recv_timeout(int sock_idx, int timeout_ms)
+{
+    if (sock_idx < 0 || sock_idx >= s_n_socks) return;
+    if (s_socks[sock_idx].fd < 0) return;
+    struct timeval tv = {
+        .tv_sec  = timeout_ms / 1000,
+        .tv_usec = (timeout_ms % 1000) * 1000,
+    };
+    setsockopt(s_socks[sock_idx].fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+
 static esp_err_t _sock_connect(int idx)
 {
     _sock_close(idx);
@@ -81,8 +92,8 @@ static esp_err_t _sock_connect(int idx)
     if (fd < 0) { ESP_LOGE(TAG, "socket() failed: %d", errno); return ESP_FAIL; }
 
     struct timeval tv = {
-        .tv_sec  = KX_TCP_RECV_TIMEOUT_MS / 1000,
-        .tv_usec = (KX_TCP_RECV_TIMEOUT_MS % 1000) * 1000,
+        .tv_sec  = TCP_RECV_TIMEOUT_READ_MS / 1000,
+        .tv_usec = (TCP_RECV_TIMEOUT_READ_MS % 1000) * 1000,
     };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
@@ -174,7 +185,7 @@ int kx_tcp_transaction(int            sock_idx,
     xSemaphoreTake(s_sock_mutex, portMAX_DELAY);
 
     int fd = s_socks[sock_idx].fd;
-    if (fd < 0) { xSemaphoreGive(s_sock_mutex); return -1; }
+    if (fd < 0) { xSemaphoreGive(s_sock_mutex); return KX_TCP_RX_NET_ERROR; }
 
     uint16_t tid = s_socks[sock_idx].next_tid++;
     if (s_socks[sock_idx].next_tid == 0)
@@ -197,7 +208,7 @@ int kx_tcp_transaction(int            sock_idx,
         ESP_LOGW(TAG, "send failed fd=%d err=%d", fd, errno);
         _sock_close(sock_idx);
         xSemaphoreGive(s_sock_mutex);
-        return -1;
+        return KX_TCP_RX_NET_ERROR;
     }
 
     int rx = recv(fd, resp, resp_max, 0);
@@ -205,26 +216,29 @@ int kx_tcp_transaction(int            sock_idx,
         ESP_LOGW(TAG, "recv failed fd=%d err=%d", fd, errno);
         _sock_close(sock_idx);
         xSemaphoreGive(s_sock_mutex);
-        return -1;
+        return KX_TCP_RX_NET_ERROR;
     }
 
     xSemaphoreGive(s_sock_mutex);
 
-    if (rx < 8) { ESP_LOGW(TAG, "response too short: %d", rx); return -1; }
+    if (rx < 8) { ESP_LOGW(TAG, "response too short: %d", rx); return KX_TCP_RX_NET_ERROR; }
 
     uint16_t resp_tid = ((uint16_t)resp[0] << 8) | resp[1];
     if (resp_tid != tid) {
         ESP_LOGW(TAG, "TID mismatch: sent=%u got=%u", tid, resp_tid);
-        return -1;
+        return KX_TCP_RX_NET_ERROR;
     }
     if (resp[6] != unit_id) {
         ESP_LOGW(TAG, "unit_id mismatch: sent=%u got=%u", unit_id, resp[6]);
-        return -1;
+        return KX_TCP_RX_NET_ERROR;
     }
     if (resp[7] & 0x80) {
         uint8_t exc = (rx > 8) ? resp[8] : 0;
         ESP_LOGW(TAG, "Modbus exception fc=0x%02x exc=0x%02x", resp[7], exc);
-        return -1;
+        // Respuesta válida del esclavo — no es fallo de red.
+        // Se distingue de KX_TCP_RX_NET_ERROR para no reintentar
+        // ni contabilizar como error de comunicación en el dispatch.
+        return KX_TCP_RX_MODBUS_EXCEPT;
     }
     return rx;
 }
@@ -237,15 +251,19 @@ float kx_tcp_read_register(int               sock_idx,
                              uint16_t          reg,
                              uint8_t           fc,
                              const kx_param_t *param,
-                             uint16_t         *raw_out)
+                             uint16_t         *raw_out,
+                             int              *out_rx_code)
 {
     uint8_t pdu[5] = { fc,
         (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF),
         0x00, 0x01 };
     uint8_t resp[KX_TCP_RESPONSE_BUF];
 
-    int rx = -1;
-    for (int a = 0; a < KX_TCP_RETRY_COUNT && rx < 0; a++) {
+    // Solo reintenta en fallo de red (KX_TCP_RX_NET_ERROR).
+    // Una excepción Modbus (KX_TCP_RX_MODBUS_EXCEPT) es definitiva:
+    // reintentar no cambia el resultado y genera tráfico innecesario.
+    int rx = KX_TCP_RX_NET_ERROR;
+    for (int a = 0; a < KX_TCP_RETRY_COUNT && rx == KX_TCP_RX_NET_ERROR; a++) {
         if (s_socks[sock_idx].fd < 0 &&
             _sock_connect(sock_idx) != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -253,10 +271,15 @@ float kx_tcp_read_register(int               sock_idx,
         }
         rx = kx_tcp_transaction(sock_idx, unit_id, pdu, sizeof(pdu),
                                  resp, sizeof(resp));
-        if (rx < 0) vTaskDelay(pdMS_TO_TICKS(50));
+        if (rx == KX_TCP_RX_NET_ERROR) vTaskDelay(pdMS_TO_TICKS(50));
     }
 
-    if (rx < 0) { if (raw_out) *raw_out = 0; return -FLT_MAX; }
+    if (out_rx_code) *out_rx_code = rx;
+
+    if (rx < 0) {
+        if (raw_out) *raw_out = 0;
+        return -FLT_MAX;
+    }
 
     uint16_t raw;
     if (fc == MB_FC_READ_COILS || fc == MB_FC_READ_DISCRETE) {
@@ -290,8 +313,10 @@ int kx_tcp_read_multi(int      sock_idx,
     uint8_t pdu[5] = { fc,
         (uint8_t)(start_reg >> 8), (uint8_t)(start_reg & 0xFF),
         (uint8_t)(num_regs  >> 8), (uint8_t)(num_regs  & 0xFF) };
-    int rx = -1;
-    for (int a = 0; a < KX_TCP_RETRY_COUNT && rx < 0; a++) {
+
+    // Solo reintenta en fallo de red. Una excepción Modbus es definitiva.
+    int rx = KX_TCP_RX_NET_ERROR;
+    for (int a = 0; a < KX_TCP_RETRY_COUNT && rx == KX_TCP_RX_NET_ERROR; a++) {
         if (s_socks[sock_idx].fd < 0 &&
             _sock_connect(sock_idx) != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -299,7 +324,7 @@ int kx_tcp_read_multi(int      sock_idx,
         }
         rx = kx_tcp_transaction(sock_idx, unit_id, pdu, sizeof(pdu),
                                  resp_buf, resp_max);
-        if (rx < 0) vTaskDelay(pdMS_TO_TICKS(50));
+        if (rx == KX_TCP_RX_NET_ERROR) vTaskDelay(pdMS_TO_TICKS(50));
     }
     return rx;
 }

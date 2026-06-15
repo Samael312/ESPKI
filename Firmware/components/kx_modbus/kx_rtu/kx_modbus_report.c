@@ -120,7 +120,7 @@ void kx_report_task(void *arg)
         if (rctx.sent > 0 || rctx.errors > 0) {
             ESP_LOGI(TAG, "");
             ESP_LOGI(TAG, "╔══════════════════════════════════════════╗");
-            ESP_LOGI(TAG, "║            REPORT  tick=%-6" PRId64 "           ║", tick_s);
+            ESP_LOGI(TAG, "║        REPORT RTU  tick=%-6" PRId64 "           ║", tick_s);
             ESP_LOGI(TAG, "╠══════════════════════════════════════════╣");
             ESP_LOGI(TAG, "║  sent=%-4d  errors=%-4d  heap=%-8" PRIu32 " ║",
                      rctx.sent, rctx.errors, kx_system_heap_free());

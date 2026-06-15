@@ -16,7 +16,8 @@ static const char *TAG = "kx_tcp_writer";
 // kx_modbus_tcp_writer.c — Escrituras Modbus TCP
 // =============================================================
 
-static esp_err_t _execute_tcp_write(int control_id, int param_id, float value)
+static esp_err_t _execute_tcp_write(const kx_tcp_writer_ctx_t *ctx,
+                                     int control_id, int param_id, float value)
 {
     const kx_param_t *param = kx_param_store_get_param(control_id, param_id);
     if (!param) return ESP_ERR_NOT_FOUND;
@@ -61,18 +62,51 @@ static esp_err_t _execute_tcp_write(int control_id, int param_id, float value)
              control_id, param_id, param->reg, fc_write,
              value, (int)(uint16_t)raw);
 
-    int rx = -1;
-    for (int a = 0; a < KX_TCP_RETRY_COUNT && rx < 0; a++) {
+    // ── Pausa el poll para exclusividad en el socket ──────────
+    // El writer ya tiene foreach_mutex, pero el pipeline puede estar
+    // entre paquetes (mutex liberado). Limpiar poll_allowed_bit garantiza
+    // que ningún otro acceso al socket ocurra durante la escritura.
+    xEventGroupClearBits(ctx->poll_eg, ctx->poll_allowed_bit);
+
+    int rx = KX_TCP_RX_NET_ERROR;
+    for (int a = 0; a < KX_TCP_RETRY_COUNT && rx == KX_TCP_RX_NET_ERROR; a++) {
+        kx_tcp_sock_set_recv_timeout(sock_idx, TCP_RECV_TIMEOUT_WRITE_MS);
         rx = kx_tcp_transaction(sock_idx, unit_id, pdu, sizeof(pdu),
                                  resp, sizeof(resp));
-        if (rx < 0) vTaskDelay(pdMS_TO_TICKS(50));
+        kx_tcp_sock_set_recv_timeout(sock_idx, TCP_RECV_TIMEOUT_READ_MS);
+        if (rx == KX_TCP_RX_NET_ERROR) vTaskDelay(pdMS_TO_TICKS(50));
     }
 
-    if (rx < 12) {
+    xEventGroupSetBits(ctx->poll_eg, ctx->poll_allowed_bit);
+
+    if (rx == KX_TCP_RX_MODBUS_EXCEPT) {
+        ESP_LOGW(TAG, "write Modbus exception ctrl=%d param=%d reg=0x%04x",
+                 control_id, param_id, param->reg);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    if (rx < 0) {
         ESP_LOGW(TAG, "write no response rx=%d", rx);
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "write OK");
+
+    // Verificar respuesta mínima:
+    // FC06: MBAP(6) + unit(1) + fc(1) + reg(2) + val(2) = 12 bytes
+    // FC10: MBAP(6) + unit(1) + fc(1) + reg(2) + count(2) = 12 bytes
+    // FC05: igual que FC06 = 12 bytes
+    if (rx < 12) {
+        ESP_LOGW(TAG, "write response too short: %d bytes", rx);
+        return ESP_FAIL;
+    }
+
+    // Verificar que el FC de respuesta coincide (no bit de excepción)
+    if (resp[7] != fc_write) {
+        ESP_LOGW(TAG, "write FC mismatch: sent=0x%02x got=0x%02x",
+                 fc_write, resp[7]);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "write OK ctrl=%d param=%d value=%.3f",
+             control_id, param_id, value);
     return ESP_OK;
 }
 
@@ -90,11 +124,17 @@ void kx_tcp_writer_task(void *arg)
         if (xQueueReceive(ctx->write_queue, &cmd, portMAX_DELAY) != pdTRUE)
             continue;
 
+        // Esperar a que el poll esté permitido antes de tomar el mutex,
+        // para no bloquear el pipeline indefinidamente durante una pausa.
         xEventGroupWaitBits(ctx->poll_eg, ctx->poll_allowed_bit,
                             pdFALSE, pdTRUE, portMAX_DELAY);
+
+        // Tomar el mutex para exclusividad con pipeline y report.
+        // _execute_tcp_write pausará el poll internamente durante
+        // la transacción para evitar colisiones de socket.
         xSemaphoreTake(ctx->foreach_mutex, portMAX_DELAY);
 
-        esp_err_t err = _execute_tcp_write(cmd.control_id, cmd.param_id,
+        esp_err_t err = _execute_tcp_write(ctx, cmd.control_id, cmd.param_id,
                                             cmd.value);
         if (err == ESP_OK) {
             kx_param_store_set_ts_set(cmd.control_id, cmd.param_id, cmd.ts);

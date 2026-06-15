@@ -12,8 +12,6 @@ static const char *TAG = "kx_modbus_uart";
 
 // =============================================================
 // kx_modbus_uart.c — Capa de transporte Modbus RTU
-//
-// Sin cambios respecto a la versión original.
 // =============================================================
 
 #ifndef KX_MODBUS_UART_NUM
@@ -111,21 +109,22 @@ int kx_modbus_transaction(const uint8_t *frame, size_t frame_len,
 
     int rx_len = uart_read_bytes(KX_MODBUS_UART_NUM, resp, resp_max,
                                   pdMS_TO_TICKS(MODBUS_RESPONSE_TIMEOUT_MS));
-    if (rx_len <= 0 || rx_len < 4) return -1;
+    if (rx_len <= 0 || rx_len < 4) return KX_RTU_RX_NET_ERROR;
 
     uint16_t rx_crc   = ((uint16_t)resp[rx_len - 1] << 8) | resp[rx_len - 2];
     uint16_t calc_crc = _crc16(resp, rx_len - 2);
     if (rx_crc != calc_crc) {
         ESP_LOGW(TAG, "CRC error: got %04x expected %04x", rx_crc, calc_crc);
-        return -1;
+        return KX_RTU_RX_NET_ERROR;
     }
     if (resp[1] & 0x80) {
         uint8_t exc = (rx_len > 2) ? resp[2] : 0;
-        ESP_LOGW(TAG, "Modbus exception: slave=%d fc=0x%02x exc=0x%02x "
-                 "(req_fc=0x%02x reg=0x%02x%02x cnt=0x%02x%02x)",
-                 frame[0], resp[1], exc,
-                 frame[1], frame[2], frame[3], frame[4], frame[5]);
-        return -1;
+        ESP_LOGW(TAG, "Modbus exception: slave=%d fc=0x%02x exc=0x%02x",
+                 frame[0], resp[1], exc);
+        // Respuesta válida del esclavo — no es fallo de bus.
+        // Se distingue de KX_RTU_RX_NET_ERROR para no reintentar
+        // ni contabilizar como error de comunicación en el dispatch.
+        return KX_RTU_RX_MODBUS_EXCEPT;
     }
     return rx_len;
 }
@@ -135,7 +134,8 @@ int kx_modbus_transaction(const uint8_t *frame, size_t frame_len,
 // =============================================================
 float kx_modbus_read_reg(uint8_t slave_addr, uint16_t reg_addr,
                           uint8_t fc, const kx_param_t *param,
-                          uint16_t *out_raw)
+                          uint16_t *out_raw,
+                          int      *out_rx_code)
 {
     uint8_t frame[6] = {
         slave_addr, fc,
@@ -143,11 +143,17 @@ float kx_modbus_read_reg(uint8_t slave_addr, uint16_t reg_addr,
         0x00, 0x01,
     };
     uint8_t resp[16];
-    int rx = -1;
-    for (int a = 0; a < MODBUS_RETRY_COUNT && rx < 0; a++) {
+
+    // Solo reintenta en fallo de bus (KX_RTU_RX_NET_ERROR).
+    // Una excepción Modbus es definitiva: reintentar genera tráfico
+    // inútil en el bus RS485 y el resultado no cambia.
+    int rx = KX_RTU_RX_NET_ERROR;
+    for (int a = 0; a < MODBUS_RETRY_COUNT && rx == KX_RTU_RX_NET_ERROR; a++) {
         rx = kx_modbus_transaction(frame, sizeof(frame), resp, sizeof(resp));
-        if (rx < 0) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
+        if (rx == KX_RTU_RX_NET_ERROR) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
     }
+
+    if (out_rx_code) *out_rx_code = rx;
 
     if (rx < 0 || rx < 4 || resp[2] == 0) {
         if (out_raw) *out_raw = 0;
@@ -186,10 +192,12 @@ int kx_modbus_read_regs_multi(uint8_t slave_addr, uint16_t start_reg,
         (uint8_t)(start_reg >> 8), (uint8_t)(start_reg & 0xFF),
         (uint8_t)(num_regs  >> 8), (uint8_t)(num_regs  & 0xFF),
     };
-    int rx = -1;
-    for (int a = 0; a < MODBUS_RETRY_COUNT && rx < 0; a++) {
+
+    // Solo reintenta en fallo de bus. Excepción Modbus es definitiva.
+    int rx = KX_RTU_RX_NET_ERROR;
+    for (int a = 0; a < MODBUS_RETRY_COUNT && rx == KX_RTU_RX_NET_ERROR; a++) {
         rx = kx_modbus_transaction(frame, sizeof(frame), resp_buf, resp_max);
-        if (rx < 0) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
+        if (rx == KX_RTU_RX_NET_ERROR) vTaskDelay(pdMS_TO_TICKS(MODBUS_INTER_FRAME_MS));
     }
     return rx;
 }

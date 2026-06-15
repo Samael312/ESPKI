@@ -38,17 +38,27 @@ int kx_dispatch_packet_tcp(QueueHandle_t      pub_queue,
             kx_param_store_get_param(slot->control_id, slot->param_id);
         if (!param) { err_count++; goto done; }
 
-        uint16_t raw   = 0;
-        float    value = kx_tcp_read_register(sock_idx, unit_id,
-                                               pkt->start_reg, pkt->fc,
-                                               param, &raw);
-        int64_t  ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
+        uint16_t raw     = 0;
+        int      rx_code = 0;
+        float    value   = kx_tcp_read_register(sock_idx, unit_id,
+                                                 pkt->start_reg, pkt->fc,
+                                                 param, &raw, &rx_code);
+        int64_t  ts_ms   = (int64_t)(esp_timer_get_time() / 1000ULL);
 
         if (value == -FLT_MAX) {
-            kx_pub_enqueue_error(pub_queue, kx_param_pub_error,
-                                  slot->control_id, slot->param_id,
-                                  pkt->start_reg, "tcp_timeout");
-            err_count++;
+            if (rx_code == KX_TCP_RX_MODBUS_EXCEPT) {
+                // Excepción Modbus limpia: registro no legible en este esclavo.
+                // No es fallo de comunicación — no incrementar err_count,
+                // no publicar error de timeout.
+                ESP_LOGD(TAG, "Modbus exc (single) param_id=%d reg=0x%04x — skipped",
+                         slot->param_id, pkt->start_reg);
+            } else {
+                // Fallo de red real (timeout, socket caído, etc.)
+                kx_pub_enqueue_error(pub_queue, kx_param_pub_error,
+                                      slot->control_id, slot->param_id,
+                                      pkt->start_reg, "tcp_timeout");
+                err_count++;
+            }
         } else {
             kx_param_store_reg_upsert_read(slot->control_id, pkt->start_reg,
                 pkt->fc, (uint8_t)param->function_write, value, ts_ms);
@@ -70,24 +80,46 @@ int kx_dispatch_packet_tcp(QueueHandle_t      pub_queue,
         int64_t ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
 
         if (rx < 0) {
-            // ESP_LOGW(TAG, "multi FAILED — fallback unit=%u reg=0x%04x num=%d",
-            //         unit_id, pkt->start_reg, pkt->num_regs);
+            if (rx == KX_TCP_RX_MODBUS_EXCEPT) {
+                // El bloque entero recibió excepción Modbus.
+                // Intentar slot a slot por si algún registro individual
+                // sí es legible (bloques parcialmente válidos).
+                ESP_LOGD(TAG, "Modbus exc (multi) reg=0x%04x num=%d — fallback slot-by-slot",
+                         pkt->start_reg, pkt->num_regs);
+            } else {
+                // Fallo de red — fallback slot a slot igualmente,
+                // por si el socket se recupera en el intento individual.
+                // ESP_LOGW(TAG, "multi FAILED — fallback unit=%u reg=0x%04x num=%d",
+                //         unit_id, pkt->start_reg, pkt->num_regs);
+            }
+
             for (int s = 0; s < pkt->num_slots; s++) {
                 const kx_pkt_slot_t *sl = &pkt->slots[s];
                 if (sl->is_gap || sl->param_id < 0) continue;
                 const kx_param_t *p =
                     kx_param_store_get_param(sl->control_id, sl->param_id);
                 if (!p) { err_count++; continue; }
-                uint16_t raw = 0;
-                float    val = kx_tcp_read_register(sock_idx, unit_id,
-                                                     sl->reg, pkt->fc,
-                                                     p, &raw);
+
+                uint16_t raw     = 0;
+                int      rx_code = 0;
+                float    val     = kx_tcp_read_register(sock_idx, unit_id,
+                                                         sl->reg, pkt->fc,
+                                                         p, &raw, &rx_code);
                 ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
+
                 if (val == -FLT_MAX) {
-                    kx_pub_enqueue_error(pub_queue, kx_param_pub_error,
-                                          sl->control_id, sl->param_id,
-                                          sl->reg, "tcp_timeout");
-                    err_count++;
+                    if (rx_code == KX_TCP_RX_MODBUS_EXCEPT) {
+                        // Registro individual no legible en este esclavo —
+                        // respuesta válida del PLC, no un fallo de comunicación.
+                        ESP_LOGD(TAG, "Modbus exc (fallback) param_id=%d reg=0x%04x — skipped",
+                                 sl->param_id, sl->reg);
+                    } else {
+                        // Fallo de red real.
+                        kx_pub_enqueue_error(pub_queue, kx_param_pub_error,
+                                              sl->control_id, sl->param_id,
+                                              sl->reg, "tcp_timeout");
+                        err_count++;
+                    }
                 } else {
                     kx_param_store_reg_upsert_read(sl->control_id, sl->reg,
                         pkt->fc, (uint8_t)p->function_write, val, ts_ms);

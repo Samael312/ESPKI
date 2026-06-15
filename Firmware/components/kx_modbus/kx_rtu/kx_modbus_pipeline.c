@@ -338,20 +338,28 @@ static void _poll_batch_packetized(kx_pipeline_ctx_t        *pctx,
 
             xSemaphoreTake(pctx->foreach_mutex, portMAX_DELAY);
             uint16_t raw = 0;
+            int rx_code = 0;
             float val = kx_modbus_read_reg(
                 (uint8_t)ctrl_info->slave_addr,
                 (uint16_t)p->reg,
                 (uint8_t)p->function_read,
-                p, &raw);
+                p, &raw, &rx_code);
             int64_t ts_ms = (int64_t)(esp_timer_get_time() / 1000ULL);
 
             if (val == -FLT_MAX) {
-                kx_pub_enqueue_error(pctx->pub_queue, kx_param_pub_error,
-                                      fc3.found_ctrl_id, pid,
-                                      (uint16_t)p->reg, "modbus_timeout");
-                snprintf(results[result_idx].err_msg,
-                         sizeof(results[result_idx].err_msg),
-                         "modbus_timeout");
+                if (rx_code == KX_RTU_RX_MODBUS_EXCEPT) {
+                    // Excepción Modbus limpia — no es fallo de bus
+                    ESP_LOGD(TAG, "Modbus exc (pipeline fallback) param_id=%d reg=0x%04x — skipped",
+                            pid, (uint16_t)p->reg);
+                    results[result_idx].ok = true;  // no marcar como error
+                } else {
+                    kx_pub_enqueue_error(pctx->pub_queue, kx_param_pub_error,
+                                        fc3.found_ctrl_id, pid,
+                                        (uint16_t)p->reg, "modbus_timeout");
+                    snprintf(results[result_idx].err_msg,
+                            sizeof(results[result_idx].err_msg),
+                            "modbus_timeout");
+                }
             } else {
                 kx_param_store_reg_upsert_read(
                     fc3.found_ctrl_id, (uint16_t)p->reg,

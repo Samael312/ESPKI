@@ -9,6 +9,7 @@
 #include "kx_telemetry.h"
 #include "../../../main/kx_config.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -28,7 +29,7 @@ static const char *TAG = "kx_modbus_tcp";
 //    histórica: 1 PLC, LAN local, sin ráfagas masivas) ────────
 #define PUB_QUEUE_SIZE       64
 #define WRITE_QUEUE_SIZE     16
-#define DEMAND_QUEUE_SIZE   128
+#define DEMAND_QUEUE_SIZE   256
 
 // ── Stacks de tareas ──────────────────────────────────────────
 #define STACK_TCP_DEMAND   5120
@@ -90,7 +91,16 @@ esp_err_t kx_modbus_tcp_start(void)
     s_pub_queue = xQueueCreate(PUB_QUEUE_SIZE, sizeof(kx_pub_result_t));
     if (!s_pub_queue) return ESP_FAIL;
 
-    s_demand_queue = xQueueCreate(DEMAND_QUEUE_SIZE, sizeof(kx_poll_demand_t));
+    {
+    static StaticQueue_t s_demand_queue_struct;
+    static DRAM_ATTR uint8_t s_demand_queue_storage[DEMAND_QUEUE_SIZE * sizeof(kx_poll_demand_t)];
+    s_demand_queue = xQueueCreateStatic(
+        DEMAND_QUEUE_SIZE,
+        sizeof(kx_poll_demand_t),
+        s_demand_queue_storage,
+        &s_demand_queue_struct
+    );
+    }
     if (!s_demand_queue) return ESP_FAIL;
 
     s_write_queue = xQueueCreate(WRITE_QUEUE_SIZE, sizeof(kx_write_cmd_t));
